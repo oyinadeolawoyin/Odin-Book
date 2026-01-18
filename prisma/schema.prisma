@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -12,4 +6,170 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+model User {
+  id                Int            @id @default(autoincrement())
+  username          String         @unique
+  email             String         @unique
+  password          String
+  avatar            String
+  website           String
+  bio               String
+
+  followersCreated  Follower[]     @relation("FollowerUser")
+  followers         Follower[]     @relation("UserFollowers")
+  followingsCreated Following[]    @relation("FollowingUser")
+  followings        Following[]    @relation("UserFollowings")
+
+  notifications     Notification[]
+  reels             Reel[]
+  posts             Post[]
+  favourites        Favourite[]
+  messages          Message[]
+  comments          Comment[]
+  likes             Like[]
+}
+
+model Follower {
+  id               Int    @id @default(autoincrement())
+  followerusername String
+  followerId       Int
+  userId           Int
+  follower         User   @relation("FollowerUser", fields: [followerId], references: [id], onDelete: Cascade)
+  user             User   @relation("UserFollowers", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, followerId])
+  @@index([followerId])
+}
+
+model Following {
+  id                Int    @id @default(autoincrement())
+  followingusername String
+  followingId       Int
+  userId            Int
+  following         User   @relation("FollowingUser", fields: [followingId], references: [id], onDelete: Cascade)
+  user              User   @relation("UserFollowings", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, followingId])
+  @@index([followingId])
+}
+
+model Notification {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  message    String?
+  link       String?
+  read       Boolean? @default(false)
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, read])
+}
+
+model Reel {
+  id         Int         @id @default(autoincrement())
+  url        String
+  thumbnail  String
+  uploadAt   DateTime    @default(now())
+  userId     Int
+
+  likes      Like[]
+  comments   Comment[]
+ 
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Post {
+  id         Int         @id @default(autoincrement())
+  imageUrl   String
+  videoUrl   String
+  thumbnail  String
+  uploadAt   DateTime    @default(now())
+  userId     Int
+
+  likes      Like[]
+  comments   Comment[]
+  favourites Favourite[]
+ 
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Favourite {
+  id     Int @id @default(autoincrement())
+  userId Int
+  postId Int
+
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([postId])
+}
+
+model Message {
+  id         Int         @id @default(autoincrement())
+  userId     Int
+
+  comments   Comment[]
+  likes      Like[]
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Comment {
+  id               Int             @id @default(autoincrement())
+  content          String
+  uploadedAt       DateTime        @default(now())
+  
+  parentId         Int?
+  receiverId       Int?
+  
+  userId           Int
+  postId           Int?
+  reelId           Int?
+  messageId        Int?
+
+  replies          Comment[]       @relation("CommentReplies")
+  likes            Like[]
+
+  user             User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post             Post?        @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reel             Reel?        @relation(fields: [reelId], references: [id], onDelete: Cascade)
+  message          Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  parent           Comment?    @relation("CommentReplies", fields: [parentId], references: [id])
+
+  @@index([userId])
+  @@index([postId])
+  @@index([reelId])
+  @@index([messageId])
+}
+
+model Like {
+  id               Int             @id @default(autoincrement())
+ 
+  userId           Int
+  postId           Int?
+  reelId           Int?
+  messageId        Int?
+  commentId        Int?
+
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post             Post?        @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reel             Reel?        @relation(fields: [reelId], references: [id], onDelete: Cascade)
+  message          Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  comment          Comment?     @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([postId])
+  @@index([reelId])
+  @@index([messageId])
 }
