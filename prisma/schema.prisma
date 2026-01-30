@@ -1,6 +1,5 @@
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -9,167 +8,106 @@ datasource db {
 }
 
 model User {
-  id                Int            @id @default(autoincrement())
-  username          String         @unique
-  email             String         @unique
-  password          String
-  avatar            String
-  website           String
-  bio               String
-
-  followersCreated  Follower[]     @relation("FollowerUser")
-  followers         Follower[]     @relation("UserFollowers")
-  followingsCreated Following[]    @relation("FollowingUser")
-  followings        Following[]    @relation("UserFollowings")
-
-  notifications     Notification[]
-  reels             Reel[]
-  posts             Post[]
-  favourites        Favourite[]
-  messages          Message[]
-  comments          Comment[]
-  likes             Like[]
-}
-
-model Follower {
-  id               Int    @id @default(autoincrement())
-  followerusername String
-  followerId       Int
-  userId           Int
-  follower         User   @relation("FollowerUser", fields: [followerId], references: [id], onDelete: Cascade)
-  user             User   @relation("UserFollowers", fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, followerId])
-  @@index([followerId])
-}
-
-model Following {
-  id                Int    @id @default(autoincrement())
-  followingusername String
-  followingId       Int
-  userId            Int
-  following         User   @relation("FollowingUser", fields: [followingId], references: [id], onDelete: Cascade)
-  user              User   @relation("UserFollowings", fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, followingId])
-  @@index([followingId])
-}
-
-model Notification {
-  id         Int      @id @default(autoincrement())
-  userId     Int
-  message    String?
-  link       String?
-  read       Boolean? @default(false)
-  createdAt  DateTime @default(now())
-
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([userId, read])
-}
-
-model Reel {
-  id         Int         @id @default(autoincrement())
-  url        String
-  thumbnail  String
-  uploadAt   DateTime    @default(now())
-  userId     Int
-
-  likes      Like[]
-  comments   Comment[]
- 
-  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-}
-
-model Post {
-  id         Int         @id @default(autoincrement())
-  imageUrl   String
-  videoUrl   String
-  thumbnail  String
-  uploadAt   DateTime    @default(now())
-  userId     Int
-
-  likes      Like[]
-  comments   Comment[]
-  favourites Favourite[]
- 
-  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-}
-
-model Favourite {
-  id     Int @id @default(autoincrement())
-  userId Int
-  postId Int
-
-  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, postId])
-  @@index([postId])
-}
-
-model Message {
-  id         Int         @id @default(autoincrement())
-  userId     Int
-
-  comments   Comment[]
-  likes      Like[]
-
-  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-}
-
-model Comment {
-  id               Int             @id @default(autoincrement())
-  content          String
-  uploadedAt       DateTime        @default(now())
+  id             Int              @id @default(autoincrement())
+  username       String           @unique
+  email          String           @unique
+  password       String
+  avatar         String?
+  bio            String?
+  role           Role             @default(USER)
+  createdAt      DateTime         @default(now())
+  timezone       String           @default("UTC")
   
-  parentId         Int?
-  receiverId       Int?
-  
-  userId           Int
-  postId           Int?
-  reelId           Int?
-  messageId        Int?
-
-  replies          Comment[]       @relation("CommentReplies")
-  likes            Like[]
-
-  user             User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  post             Post?        @relation(fields: [postId], references: [id], onDelete: Cascade)
-  reel             Reel?        @relation(fields: [reelId], references: [id], onDelete: Cascade)
-  message          Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  parent           Comment?    @relation("CommentReplies", fields: [parentId], references: [id])
-
-  @@index([userId])
-  @@index([postId])
-  @@index([reelId])
-  @@index([messageId])
+  projects       Project[]
+  sprints        Sprint[]
+  writingPlan    WritingPlan?
+  weeklyProgress WeeklyProgress[]
 }
 
-model Like {
-  id               Int             @id @default(autoincrement())
- 
-  userId           Int
-  postId           Int?
-  reelId           Int?
-  messageId        Int?
-  commentId        Int?
-
-  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  post             Post?        @relation(fields: [postId], references: [id], onDelete: Cascade)
-  reel             Reel?        @relation(fields: [reelId], references: [id], onDelete: Cascade)
-  message          Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  comment          Comment?     @relation(fields: [commentId], references: [id], onDelete: Cascade)
-
+model Project {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  title       String   // "The Dragon's Oath"
+  description String?  // "Fantasy trilogy, book 1"
+  link        String   // Google Docs link
+  createdAt   DateTime @default(now())
+  
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
   @@index([userId])
-  @@index([postId])
-  @@index([reelId])
-  @@index([messageId])
+}
+
+model Sprint {
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  duration     Int       // minutes
+  checkin      String?
+  checkout     String?
+  wordsWritten Int       @default(0) // User reports this
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+  isActive     Boolean   @default(true)
+  
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([isActive])
+  @@index([startedAt])
+}
+
+
+model WritingPlan {
+  id            Int  @id @default(autoincrement())
+  userId        Int  @unique
+  
+  // Recurring goals (template)
+  mondayGoal    Int? // null = skip, 0 = no goal, 500 = word goal
+  tuesdayGoal   Int?
+  wednesdayGoal Int?
+  thursdayGoal  Int?
+  fridayGoal    Int?
+  saturdayGoal  Int?
+  sundayGoal    Int?
+
+
+  // Preferred writing time (HH:mm)
+  mondayTime    String?
+  tuesdayTime   String?
+  wednesdayTime String?
+  thursdayTime  String?
+  fridayTime    String?
+  saturdayTime  String?
+  sundayTime    String?
+  
+  user          User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+}
+
+model WeeklyProgress {
+  id              Int      @id @default(autoincrement())
+  userId          Int
+  weekStart       DateTime // Monday of this week (e.g., Jan 27, 2025)
+  
+  // Checkmarks for THIS WEEK ONLY
+  mondayDone      Boolean  @default(false)
+  tuesdayDone     Boolean  @default(false)
+  wednesdayDone   Boolean  @default(false)
+  thursdayDone    Boolean  @default(false)
+  fridayDone      Boolean  @default(false)
+  saturdayDone    Boolean  @default(false)
+  sundayDone      Boolean  @default(false)
+  
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, weekStart]) // One record per user per week
+  @@index([userId])
+  @@index([weekStart])
+}
+
+enum Role {
+  USER
+  ADMIN
+  SPONSOR
+  FOUNDING_WRITER
 }
