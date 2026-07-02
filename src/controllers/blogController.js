@@ -24,6 +24,7 @@ const VALID_POST_CATEGORIES = [
   "Stories from Writers",
   "Writing Tips",
   "Finished Drafts",
+  "Behind the Drafts",
   "Opinion",
   "Community Update & News",
 ];
