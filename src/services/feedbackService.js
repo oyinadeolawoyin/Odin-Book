@@ -603,9 +603,9 @@ async function createResponse(criticId, submissionId, data) {
     });
 
     // STATUS TRANSITIONS
-    //    SPOTLIGHT → ARCHIVE when it hits 3 critiques, then promote oldest QUEUE item.
+    //    SPOTLIGHT → ARCHIVE when it hits 2 critiques, then promote oldest QUEUE item.
     //    QUEUE submissions stay in QUEUE until a spotlight slot opens — FIFO, no conditions.
-    if (updatedSub.critiqueCount >= 3 && updatedSub.status !== "ARCHIVE") {
+    if (updatedSub.critiqueCount >= 2 && updatedSub.status !== "ARCHIVE") {
       await tx.feedbackSubmission.update({
         where: { id: submissionId },
         data:  { status: "ARCHIVE" },
