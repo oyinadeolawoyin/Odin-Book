@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "MiniChallengeType" ADD VALUE 'CONSECUTIVE_SPRINT_DAYS';

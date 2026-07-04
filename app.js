@@ -10,6 +10,7 @@ const { startDaysChallengeCron } = require("./jobs/dayschallengeexpirycron");
 const { startDaysChallengeReminderCron } = require("./jobs/dayschallengeremindercron");
 const { startDraftPlanReminderCron } = require("./jobs/draftplanremindercron");
 const { startSprintReminderCron } = require("./jobs/sprintremindercron");
+const { startEventFinalizeCron } = require("./jobs/eventcron");
 
 const rateLimit = require("express-rate-limit");
 
@@ -26,6 +27,8 @@ const draftRoutes = require("./src/routes/draftroutes");
 const reportRoutes = require("./src/routes/reportRoutes");
 const challengeRoutes = require("./src/routes/challengeroutes");
 const threadRoutes = require("./src/routes/threadroutes");
+const eventRoutes = require("./src/routes/eventroutes");
+const miniChallengeRoutes = require("./src/routes/minichallengeroutes");
 const draftPlanRoutes = require("./src/routes/draftplanroutes");
 const dayChallengeRoutes = require("./src/routes/dayschallengeroutes");
 const directMessageRoutes = require("./src/routes/directmessageroutes");
@@ -53,6 +56,7 @@ startDaysChallengeCron();
 startDaysChallengeReminderCron();
 startDraftPlanReminderCron();
 startSprintReminderCron();
+startEventFinalizeCron();
 
 app.use("/api/auth",          authRoutes);
 app.use("/api/sprint",        groupSprintRoutes);
@@ -67,6 +71,8 @@ app.use("/api/drafts", draftRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/challenge", challengeRoutes);
 app.use("/api/threads", threadRoutes);
+app.use("/api/events", eventRoutes);
+app.use("/api/mini-challenges", miniChallengeRoutes);
 app.use("/api/draftplan", draftPlanRoutes);
 app.use("/api/days-challenge", dayChallengeRoutes);
 app.use("/api/direct-messages", directMessageRoutes);

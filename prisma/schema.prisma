@@ -22,7 +22,7 @@ model User {
   avatar           String?
   bio              String?
   dateOfBirth      DateTime?
-  role             Role      @default(USER)
+  role             Role      @default(USER)   // permission level only — USER/ADMIN/SPONSOR/FOUNDING_WRITER. Event/challenge rewards are UserBadge rows now, never written here.
   createdAt        DateTime  @default(now())
   timezone         String    @default("UTC")
   resetToken       String?   @unique
@@ -91,6 +91,10 @@ model User {
   // ── days challenge relations ─────────────────────────────────────────────
   daysChallenge        DaysChallenge?
   daysChallengeCheckIns DaysChallengeCheckIn[]
+
+  // ── badges / mini-challenges ──────────────────────────────────────────────
+  badges               UserBadge[]
+  miniChallengeResults MiniChallengeResult[]
 }
 
 model UserBlock {
@@ -648,6 +652,171 @@ model DraftWritingDay {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// EVENT  (admin-created community events, e.g. "Design Your Summer Writing Routine")
+// ─────────────────────────────────────────────────────────────────────────────
+// Members can only join an event if they already have an active DraftPlan.
+// On purpose, Event does NOT hold a Prisma relation to DraftPlan — we just
+// keep a flat list of the DraftPlan ids that joined (participantPlanIds).
+// This keeps Event fully decoupled: a DraftPlan can be deleted/recreated
+// without cascading into the event, and we don't need a join table for
+// what is really just "which plans opted in".
+//
+// When the event ends, a job (cron or manual admin trigger) walks
+// participantPlanIds, looks up each DraftPlan, and — for every plan that
+// hit its writing target (isCompleted = true) — grants that writer a
+// UserBadge (sourceType: EVENT) snapshotting badgeName/badgeIcon. This
+// never touches User.role, which stays a clean permission enum.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Event {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String
+  imageUrl    String?
+
+  startDate   DateTime
+  endDate     DateTime
+
+  // Badge granted to anyone whose linked DraftPlan is complete when the
+  // event is finalized. Stored here as the "source of truth" the admin
+  // edits; UserBadge copies these values at the moment each badge is
+  // earned, so later edits here don't alter badges already awarded.
+  badgeName   String
+  badgeIcon   String
+
+  // Flat list of DraftPlan ids that joined this event.
+  // No relation — see note above. Prisma lets us `push` to this natively.
+  participantPlanIds Int[] @default([])
+
+  status      EventStatus @default(UPCOMING)
+  finalizedAt DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status])
+  @@index([startDate])
+  @@index([endDate])
+}
+
+enum EventStatus {
+  UPCOMING
+  ACTIVE
+  ENDED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MINI CHALLENGES  (always-on weekly achievement rotation)
+// ─────────────────────────────────────────────────────────────────────────────
+// Fully decoupled from Event — there's no "joining". A small pool of
+// MiniChallengeTemplate rows cycles automatically week after week for the
+// whole community (which one is "live" for any given week is pure math —
+// see minichallengeservice.js's rotation resolver). A sweep evaluates each
+// user's own existing activity (Sprint / DraftProgressLog /
+// DaysChallengeCheckIn) against that week's template once their local week
+// has closed, records one idempotent MiniChallengeResult per user per week,
+// and — if they cleared the bar — grants a UserBadge with claimedAt left
+// null until the user taps "claim" on their profile.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One row per week that's actually been resolved — created the first time
+// getLiveTemplate() is asked about that week, and never overwritten after
+// that (unless the assigned template gets paused mid-week — see
+// getLiveTemplate). This is what stops adding/pausing/enabling a template
+// from reshuffling a week that's already in progress: the rotation math in
+// getLiveTemplate is only consulted for weeks that haven't been locked in
+// yet.
+model MiniChallengeWeekAssignment {
+  id         Int      @id @default(autoincrement())
+  weekStart  DateTime @unique
+  templateId Int
+  createdAt  DateTime @default(now())
+
+  template MiniChallengeTemplate @relation(fields: [templateId], references: [id])
+
+  @@index([templateId])
+}
+
+model MiniChallengeTemplate {
+  id            Int               @id @default(autoincrement())
+  title         String            // e.g. "Session Sprint Week"
+  description   String?
+  type          MiniChallengeType
+  targetValue   Int               // ignored for WEEKLY_GOAL — everyone's own DraftPlan.weeklyGoal applies instead
+  badgeName     String
+  badgeIcon     String
+  rotationOrder Int               @unique   // 0, 1, 2, 3... position in the cycle
+  isActive      Boolean           @default(true)   // pause a type without deleting its history
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  results       MiniChallengeResult[]
+  weekAssignments MiniChallengeWeekAssignment[]
+
+  @@index([rotationOrder])
+  @@index([isActive])
+}
+
+enum MiniChallengeType {
+  SESSION_COUNT     // activity logged on >= targetValue distinct days this week (DraftPlan log OR DaysChallenge check-in)
+  WEEKLY_GOAL       // sum of DraftProgressLog.countLogged this week >= the writer's own DraftPlan.weeklyGoal
+  SPRINT_COUNT      // >= targetValue completed Sprints this week (does not need to be consecutive days)
+  CONSECUTIVE_DAYS  // longest run of consecutive days *within this week* with writing activity (DraftPlan log OR DaysChallenge check-in) >= targetValue
+  CONSECUTIVE_SPRINT_DAYS // longest run of consecutive days *within this week* with a completed Sprint >= targetValue
+}
+
+// One row per writer per evaluated week — keeps the sweep idempotent (never
+// double-processes anyone) and doubles as "this week's challenge" data.
+model MiniChallengeResult {
+  id            Int      @id @default(autoincrement())
+  templateId    Int
+  userId        Int
+  weekStart     DateTime // Monday of the evaluated week (the writer's own local calendar week)
+
+  achievedValue Int
+  targetValue   Int?     // snapshot of the bar they were evaluated against (writer's own weeklyGoal for WEEKLY_GOAL)
+  completed     Boolean
+  evaluatedAt   DateTime @default(now())
+
+  template MiniChallengeTemplate @relation(fields: [templateId], references: [id])
+  user     User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([weekStart, userId])   // one evaluated challenge per person per week
+  @@index([templateId])
+  @@index([userId])
+  @@index([weekStart])
+}
+
+// ── Earned badges, shown on the profile page ──────────────────────────────
+// Snapshot, not a live FK — an Event/MiniChallengeTemplate can be edited or
+// disabled later without altering or deleting badges people already earned.
+model UserBadge {
+  id         Int             @id @default(autoincrement())
+  userId     Int
+
+  name       String          // snapshot of badgeName at the moment earned
+  icon       String          // snapshot of badgeIcon
+  sourceType BadgeSourceType
+  sourceId   Int             // Event.id, or MiniChallengeTemplate.id for weekly badges — informational only, no FK
+  weekStart  DateTime?       // set only for MINI_CHALLENGE badges — null for EVENT/MILESTONE badges
+
+  earnedAt   DateTime  @default(now())
+  claimedAt  DateTime?        // null = unclaimed, shows the "claim" moment on profile
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sourceType, sourceId, weekStart])  // can't earn the exact same badge twice
+  @@index([userId])
+  @@index([claimedAt])
+}
+
+enum BadgeSourceType {
+  EVENT
+  MINI_CHALLENGE
+  MILESTONE   // reserved for later — not used yet
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DIRECT MESSAGES
 // A private two-person chat between any two members.
 //
@@ -1041,6 +1210,9 @@ model WritingDraft {
 // ENUMS
 // ─────────────────────────────────────────────────────────────────────────────
 
+// User.role's actual type — permission level only (USER/ADMIN/SPONSOR/
+// FOUNDING_WRITER). Event and mini-challenge rewards live in UserBadge
+// instead and never touch this field.
 enum Role {
   USER
   ADMIN
