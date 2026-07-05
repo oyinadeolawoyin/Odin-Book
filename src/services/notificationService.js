@@ -154,11 +154,6 @@ function buildEmailHtml({ kind, message, title, excerpt, ctaLabel, fullLink }) {
         <a href="${fullLink}" style="display:inline-block;background:#1a1a2e;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:12px 26px;border-radius:8px;">${buttonLabel}</a>
       </td>
     </tr>
-    <tr>
-      <td style="background:#faf7f2;padding:16px 28px;border-top:1px solid #e8dcc8;">
-        <p style="margin:0;font-size:12px;color:#9a8c7a;">You're receiving this because you're part of the Quillweave community. You can adjust what you get notified about anytime in your notification settings.</p>
-      </td>
-    </tr>
   </table>
 </div>`.trim();
 }
