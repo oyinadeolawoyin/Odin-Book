@@ -36,7 +36,9 @@ function startDraftPlanReminderCron() {
         const message = `Time to write! Your goal today is ${w.dailyGoal} ${unit} on "${w.storyTitle}". You've got this.`;
         const link    = `/draftplan`;
 
-        notifyUser(w.user, message, link, "draftplan_daily_reminder").catch(() => {});
+        notifyUser(w.user, message, link, "draftplan_daily_reminder", "GENERAL", {
+          kind: "challenge_reminder", title: w.storyTitle,
+        }).catch(() => {});
       }
     } catch (err) {
       console.error("[draftPlanReminderCron] error:", err.message);

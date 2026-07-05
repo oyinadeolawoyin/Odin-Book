@@ -35,7 +35,9 @@ function startDaysChallengeReminderCron() {
           `${days}-day challenge going.`;
         const link = `/days-challenge`;
 
-        notifyUser(w.user, message, link, "dayschallenge_daily_reminder").catch(() => {});
+        notifyUser(w.user, message, link, "dayschallenge_daily_reminder", "GENERAL", {
+          kind: "challenge_reminder", title: w.storyTitle,
+        }).catch(() => {});
       }
     } catch (err) {
       console.error("[daysChallengeReminderCron] error:", err.message);

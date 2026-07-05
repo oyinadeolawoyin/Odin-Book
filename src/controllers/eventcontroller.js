@@ -53,7 +53,9 @@ async function createEvent(req, res) {
       const notifLink = `/events/${event.id}`;
       users.forEach((u) => {
         if (u.id === req.user.id) return;
-        notifyUser(u, `New event: "${title}"`, notifLink, "event_new").catch(() => {});
+        notifyUser(u, `New event: "${title}"`, notifLink, "event_new", "GENERAL", {
+          kind: "new_event", title, excerpt: description,
+        }).catch(() => {});
       });
     }).catch(() => {});
   } catch (error) {
@@ -233,7 +235,9 @@ async function finalizeEvent(req, res) {
             user,
             `You completed "${result.event.title}" and earned the ${result.event.badgeName} badge!`,
             `/events/${eventId}`,
-            "event_finisher"
+            "event_finisher",
+            "GENERAL",
+            { kind: "event_badge", title: result.event.badgeName }
           ).catch(() => {});
         })
       ).catch(() => {});

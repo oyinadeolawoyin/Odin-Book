@@ -48,7 +48,9 @@ async function runExpiry() {
       const title   = c.storyTitle ? ` on "${c.storyTitle}"` : "";
       const message = `Your ${days}-day writing challenge${title} has ended. Great effort — you can start a new one whenever you're ready.`;
       const link    = `/days-challenge`;
-      notifyUser(c.user, message, link, "dayschallenge_expired").catch(() => {});
+      notifyUser(c.user, message, link, "dayschallenge_expired", "GENERAL", {
+        kind: "challenge_update", title: c.storyTitle,
+      }).catch(() => {});
     }
   } catch (err) {
     console.error("[daysChallengeExpiryCron] error:", err.message);

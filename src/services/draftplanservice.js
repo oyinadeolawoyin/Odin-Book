@@ -594,6 +594,68 @@ async function getWritersWhoLoggedToday() {
   }));
 }
 
+// Writers who share TODAY as a picked writing day with the requesting user —
+// "writing with you today". Only returned if the requesting user's own plan
+// also has today picked, so this stays a same-day-peers view, not a global
+// schedule broadcast. Includes peers who've already logged today (marked via
+// hasLoggedToday) alongside those still getting ready — previously this
+// excluded anyone who'd logged, which meant a peer would just vanish from
+// the list the moment they finished their session instead of showing as done.
+async function getWritersScheduledToday(requestingUserId) {
+  const myPlan = await prisma.draftPlan.findUnique({
+    where: { userId: requestingUserId },
+    include: { writingDays: true },
+  });
+  if (!myPlan) return [];
+
+  const jsDayToday = new Date().getUTCDay();
+  const iAmWritingToday = myPlan.writingDays.some((d) => WEEKDAY_JS[d.day] === jsDayToday);
+  if (!iAmWritingToday) return [];
+
+  const today    = toMidnightUTC(new Date());
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  // Map of userId -> today's log, so each peer can be marked logged vs.
+  // still getting ready, rather than logged peers being dropped entirely.
+  const todaysLogs = await prisma.draftProgressLog.findMany({
+    where:  { logDate: { gte: today, lt: tomorrow } },
+    select: { userId: true, countLogged: true, metDailyGoal: true },
+  });
+  const loggedByUserId = new Map(todaysLogs.map((l) => [l.userId, l]));
+
+  const plans = await prisma.draftPlan.findMany({
+    where: {
+      userId:      { not: requestingUserId },
+      isCompleted: false,
+    },
+    include: {
+      user:        { select: { id: true, username: true, avatar: true } },
+      writingDays: true,
+    },
+  });
+
+  return plans
+    .filter((p) => p.writingDays.some((d) => WEEKDAY_JS[d.day] === jsDayToday))
+    .map((p) => {
+      const todayLog = loggedByUserId.get(p.userId);
+      return {
+        userId:         p.userId,
+        username:       p.user.username,
+        avatar:         p.user.avatar,
+        storyTitle:     p.storyTitle,
+        goalType:       p.goalType,
+        hasLoggedToday: Boolean(todayLog),
+        countLogged:    todayLog?.countLogged ?? 0,
+        metDailyGoal:   todayLog?.metDailyGoal ?? false,
+      };
+    })
+    .sort((a, b) => {
+      if (a.hasLoggedToday !== b.hasLoggedToday) return a.hasLoggedToday ? -1 : 1;
+      return a.username.localeCompare(b.username);
+    });
+}
+
 // ─── NOTIFICATION HELPERS ─────────────────────────────────────────────────────
 
 async function getOtherActivePlanUsers(excludeUserId) {
@@ -675,6 +737,7 @@ module.exports = {
   getPlanProgress,
   getActiveDraftWriters,
   getWritersWhoLoggedToday,
+  getWritersScheduledToday,
   getOtherActivePlanUsers,
   getUserById,
   getWritersToRemindNow,

@@ -11,6 +11,12 @@ const upload = require("../config/multer");
 router.get("/active",       ctrl.getActiveDraftWriters);
 router.get("/logged-today", ctrl.getWritersWhoLoggedToday);
 
+// Same-day writing peers — requires auth since it's scoped to writers who
+// share today as a writing day with the requesting user (checked in service).
+// Includes peers who've already logged today (marked hasLoggedToday) as
+// well as those still getting ready.
+router.get("/scheduled-today", authenticateJWT, ctrl.getWritersScheduledToday);
+
 // ─── PLAN (authenticated) ─────────────────────────────────────────────────────
 
 router.post("/",    authenticateJWT, ctrl.createPlan);

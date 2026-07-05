@@ -89,7 +89,8 @@ async function createPost(req, res) {
           `A new post has been published: ${postTitle}`,
           notifLink,
           "community_new_post",
-          "COMMUNITY_UPDATE"
+          "COMMUNITY_UPDATE",
+          { kind: "community_update", title: post.title, excerpt: post.content }
         ).catch(() => {});
       });
     }).catch(() => {});

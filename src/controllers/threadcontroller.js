@@ -136,7 +136,9 @@ async function createThread(req, res) {
       const notifLink = `/threads/${thread.id}`;
       users.forEach((u) => {
         if (u.id === req.user.id) return;
-        notifyUser(u, `New thread: "${title}"`, notifLink, "thread_new").catch(() => {});
+        notifyUser(u, `New thread: "${title}"`, notifLink, "thread_new", "GENERAL", {
+          kind: "new_thread", title,
+        }).catch(() => {});
       });
     }).catch(() => {});
   } catch (error) {
@@ -280,7 +282,9 @@ async function toggleLike(req, res) {
           threadService.getUserById(thread.authorId).then((author) => {
             if (author) {
               const notifLink = `/threads/${threadId}`;
-              notifyUser(author, `${req.user.username} liked your thread "${thread.title}".`, notifLink, "thread_like").catch(() => {});
+              notifyUser(author, `${req.user.username} liked your thread "${thread.title}".`, notifLink, "thread_like", "GENERAL", {
+                kind: "reaction", title: thread.title,
+              }).catch(() => {});
             }
           }).catch(() => {});
         }
@@ -389,7 +393,9 @@ async function toggleCommentLike(req, res) {
           threadService.getUserById(comment.authorId).then((author) => {
             if (author) {
               const notifLink = `/threads/${comment.threadId}?comment=${commentId}`;
-              notifyUser(author, `${req.user.username} liked your comment.`, notifLink, "thread_comment_like").catch(() => {});
+              notifyUser(author, `${req.user.username} liked your comment.`, notifLink, "thread_comment_like", "GENERAL", {
+                kind: "reaction",
+              }).catch(() => {});
             }
           }).catch(() => {});
         }
@@ -493,7 +499,9 @@ async function toggleReplyLike(req, res) {
           threadService.getUserById(reply.authorId).then((author) => {
             if (author) {
               const notifLink = `/threads/${reply.comment?.threadId}?comment=${reply.commentId}&reply=${replyId}`;
-              notifyUser(author, `${req.user.username} liked your reply.`, notifLink, "thread_reply_like").catch(() => {});
+              notifyUser(author, `${req.user.username} liked your reply.`, notifLink, "thread_reply_like", "GENERAL", {
+                kind: "reaction",
+              }).catch(() => {});
             }
           }).catch(() => {});
         }

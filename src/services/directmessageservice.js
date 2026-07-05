@@ -1,6 +1,5 @@
 // src/services/directMessageService.js
 const prisma = require("../config/prismaClient");
-const { notifyUser } = require("./notificationService");
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
@@ -221,40 +220,25 @@ async function sendMessage(senderId, conversationId, { content, quotedMessageId 
     data:  { updatedAt: new Date() },
   });
 
-  // ── Notify the recipient ───────────────────────────────────────────────────
-  // Find the other participant in the conversation
+  // ── Recipient lookup ───────────────────────────────────────────────────────
+  // The controller handles actually firing the notification (fire-and-forget,
+  // after the response is sent) — here we just hand back what it needs to do
+  // that: who to notify, and the sender's name for the notification copy.
   const recipientId = conversation.userAId === senderId
     ? conversation.userBId
     : conversation.userAId;
 
-  // Get sender's username for the notification message, and the recipient's
-  // username + email so notifyUser() can push/email them.
   const [sender, recipient] = await Promise.all([
     prisma.user.findUnique({ where: { id: senderId }, select: { username: true } }),
     prisma.user.findUnique({ where: { id: recipientId }, select: { id: true, username: true, email: true } }),
   ]);
 
-  const senderName = sender?.username ?? "Someone";
-  const isReply    = !!quotedMessageId;
-
-  const notifMessage = isReply
-    ? `${senderName} replied to your message`
-    : `${senderName} sent you a message`;
-
-  if (recipient) {
-    // type: "MESSAGE" — notifyUser() skips writing an inbox/bell row for this
-    // type (the Messages page + sidebar badge already cover it) but still
-    // sends push/email if the user's "direct_message" preferences allow it.
-    await notifyUser(
-      recipient,
-      notifMessage,
-      `/messages/${conversationId}`,
-      "direct_message",
-      "MESSAGE"
-    );
-  }
-
-  return formatMessage(message);
+  return {
+    message:    formatMessage(message),
+    recipient:  recipient ?? null,
+    senderName: sender?.username ?? "Someone",
+    isReply:    !!quotedMessageId,
+  };
 }
 
 // Soft-delete a message. Only the sender can delete their own message.

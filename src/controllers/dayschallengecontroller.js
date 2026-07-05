@@ -54,7 +54,9 @@ async function completeChallenge(req, res) {
         const title   = result.challenge.storyTitle ? ` on "${result.challenge.storyTitle}"` : "";
         const message = `${req.user.username} just completed their ${result.challenge.duration === "SEVEN" ? "7" : "15"}-day challenge${title}!`;
         const link    = `/days-challenge`;
-        users.forEach((u) => notifyUser(u, message, link, "dayschallenge_completed").catch(() => {}));
+        users.forEach((u) => notifyUser(u, message, link, "dayschallenge_completed", "GENERAL", {
+          kind: "challenge_update", title: result.challenge.storyTitle,
+        }).catch(() => {}));
       })
       .catch(() => {});
 
@@ -97,7 +99,9 @@ async function logProgress(req, res) {
         const title   = challenge.storyTitle ? ` on "${challenge.storyTitle}"` : "";
         const message = `${req.user.username} just logged ${checkIn.countLogged} ${unit}${title} in their days challenge`;
         const link    = `/days-challenge`;
-        users.forEach((u) => notifyUser(u, message, link, "dayschallenge_progress_logged").catch(() => {}));
+        users.forEach((u) => notifyUser(u, message, link, "dayschallenge_progress_logged", "GENERAL", {
+          kind: "challenge_update", title: challenge.storyTitle,
+        }).catch(() => {}));
       })
       .catch(() => {});
 
@@ -109,7 +113,9 @@ async function logProgress(req, res) {
           const title   = challenge.storyTitle ? ` on "${challenge.storyTitle}"` : "";
           const message = `${req.user.username} just completed all ${days} days of their writing challenge${title}!`;
           const link    = `/days-challenge`;
-          users.forEach((u) => notifyUser(u, message, link, "dayschallenge_completed").catch(() => {}));
+          users.forEach((u) => notifyUser(u, message, link, "dayschallenge_completed", "GENERAL", {
+            kind: "challenge_update", title: challenge.storyTitle,
+          }).catch(() => {}));
         })
         .catch(() => {});
     }

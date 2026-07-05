@@ -54,7 +54,9 @@ async function createSubmission(req, res) {
       .then((users) => {
         const message = `${submission.user.username} posted a new submission: "${submission.title}"`;
         const link    = `/critique/${submission.id}`;
-        users.forEach((user) => notifyUser(user, message, link, "feedback_new_submission").catch(() => {}));
+        users.forEach((user) => notifyUser(user, message, link, "feedback_new_submission", "GENERAL", {
+          kind: "new_submission", title: submission.title,
+        }).catch(() => {}));
       })
       .catch(() => {});
 
@@ -206,7 +208,9 @@ async function createResponse(req, res) {
     if (submissionAuthor && submissionAuthor.id !== req.user.id) {
       const message = `${req.user.username ?? "Someone"} left a critique on your submission: "${submissionTitle ?? ""}"`;
       const link    = `/critique/${req.params.id}#critique-${response.id}`;
-      notifyUser(submissionAuthor, message, link, "feedback_critique_received").catch(() => {});
+      notifyUser(submissionAuthor, message, link, "feedback_critique_received", "GENERAL", {
+        kind: "reaction", title: submissionTitle,
+      }).catch(() => {});
     }
 
     res.status(201).json(responseData);
@@ -243,7 +247,9 @@ async function toggleResponseUpvote(req, res) {
           if (!critic) return;
           const message = `${req.user.username ?? "Someone"} upvoted your critique on "${result.submissionTitle ?? "a submission"}"`;
           const link    = `/critique/${result.submissionId}#critique-${req.params.responseId}`;
-          notifyUser(critic, message, link).catch(() => {});
+          notifyUser(critic, message, link, null, "GENERAL", {
+            kind: "reaction", title: result.submissionTitle,
+          }).catch(() => {});
         }).catch(() => {});
       }
 
@@ -352,7 +358,9 @@ async function toggleParagraphCommentUpvote(req, res) {
           const paraLabel = typeof result.paragraphIndex === "number" ? ` on paragraph ${result.paragraphIndex + 1}` : "";
           const message = `Your comment${paraLabel} in "${result.submissionTitle ?? "a submission"}" reached ${result.newTotal} upvotes — you earned ${result.pointsAwarded} points!`;
           const link    = `/critique/${result.submissionId}`;
-          notifyUser(commentAuthor, message, link).catch(() => {});
+          notifyUser(commentAuthor, message, link, null, "GENERAL", {
+            kind: "reaction", title: result.submissionTitle,
+          }).catch(() => {});
         }).catch(() => {});
       }
 

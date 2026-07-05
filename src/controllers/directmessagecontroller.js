@@ -1,5 +1,6 @@
 // src/controllers/directMessageController.js
 const dmService = require("../services/directmessageservice");
+const { notifyUser } = require("../services/notificationService");
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -68,12 +69,30 @@ async function sendMessage(req, res) {
 
     const { content, quotedMessageId } = req.body;
 
-    const message = await dmService.sendMessage(req.user.id, conversationId, {
+    const result = await dmService.sendMessage(req.user.id, conversationId, {
       content,
       quotedMessageId: quotedMessageId ? parseInt(quotedMessageId, 10) : undefined,
     });
 
-    res.status(201).json(message);
+    res.status(201).json(result.message);
+
+    // Notify the recipient (fire-and-forget) — type: "MESSAGE" so notifyUser()
+    // skips writing an inbox/bell row (the Messages page + sidebar badge
+    // already cover it) but still sends push/email per their preferences.
+    if (result.recipient) {
+      const notifMessage = result.isReply
+        ? `${result.senderName} replied to your message`
+        : `${result.senderName} sent you a message`;
+
+      notifyUser(
+        result.recipient,
+        notifMessage,
+        `/messages/${conversationId}`,
+        "direct_message",
+        "MESSAGE",
+        { kind: "direct_message", excerpt: result.message.content }
+      ).catch(() => {});
+    }
   } catch (err) {
     res.status(errStatus(err.message)).json({ message: err.message });
   }

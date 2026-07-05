@@ -87,7 +87,9 @@ async function logProgress(req, res) {
             : plan.goalType === "CHAPTERS" ? "chapters" : "scenes";
           const message = `${req.user.username} just logged ${log.countLogged} ${unit} on "${plan.storyTitle}"`;
           const link    = `/draftplan`;
-          users.forEach((u) => notifyUser(u, message, link, "draftplan_progress_logged").catch(() => {}));
+          users.forEach((u) => notifyUser(u, message, link, "draftplan_progress_logged", "GENERAL", {
+            kind: "challenge_update", title: plan.storyTitle,
+          }).catch(() => {}));
         })
         .catch(() => {});
     }
@@ -97,7 +99,9 @@ async function logProgress(req, res) {
         .then((users) => {
           const message = `${req.user.username} just finished their draft of "${plan.storyTitle}"! Go congratulate them!`;
           const link    = `/draftplan`;
-          users.forEach((u) => notifyUser(u, message, link, "draftplan_draft_completed").catch(() => {}));
+          users.forEach((u) => notifyUser(u, message, link, "draftplan_draft_completed", "GENERAL", {
+            kind: "challenge_update", title: plan.storyTitle,
+          }).catch(() => {}));
         })
         .catch(() => {});
     }
@@ -137,6 +141,17 @@ async function getWritersWhoLoggedToday(req, res) {
   }
 }
 
+// Requires auth — only returns results if the requesting user's own plan
+// also has today as a picked writing day (enforced in the service).
+async function getWritersScheduledToday(req, res) {
+  try {
+    const writers = await draftPlanService.getWritersScheduledToday(req.user.id);
+    res.json(writers);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+}
+
 module.exports = {
   createPlan,
   getMyPlan,
@@ -146,4 +161,5 @@ module.exports = {
   uploadMoodboardImage,
   getActiveDraftWriters,
   getWritersWhoLoggedToday,
+  getWritersScheduledToday,
 };
