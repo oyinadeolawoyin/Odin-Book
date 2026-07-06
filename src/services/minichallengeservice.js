@@ -483,7 +483,7 @@ async function getWeeklyLeaderboard({ limit = LEADERBOARD_MAX_ENTRIES } = {}) {
   };
 }
 
-// ─── Evaluation + recording (used by the future cron sweep) ──────────────────
+// ─── Evaluation + recording (run by jobs/minichallengecron.js) ───────────────
 
 /**
  * Evaluates one user's just-closed local week against that week's template,
@@ -517,8 +517,14 @@ async function evaluateAndRecordWeek(userId, weekStart) {
     },
   });
 
+  let isNewBadge = false;
   if (completed) {
-    await prisma.userBadge.upsert({
+    // update:{} is a no-op on an existing row, so earnedAt only ever gets
+    // set by the create branch — comparing against `before` tells the
+    // caller (the cron) whether this call is the one that just granted the
+    // badge, vs. an idempotent re-run of a week already recorded.
+    const before = new Date();
+    const badge = await prisma.userBadge.upsert({
       where: {
         userId_sourceType_sourceId_weekStart: {
           userId,
@@ -537,9 +543,23 @@ async function evaluateAndRecordWeek(userId, weekStart) {
         weekStart,
       },
     });
+    isNewBadge = badge.earnedAt >= before;
   }
 
-  return result;
+  return { ...result, isNewBadge, template };
+}
+
+// Users who could plausibly need this week's evaluation run — i.e. anyone
+// not deleted. We intentionally don't filter to "recently active" here:
+// unlike the leaderboard (a live snapshot that's fine to skip quiet users
+// on), the cron is the one place a completed week gets permanently
+// recorded, so it must not silently miss someone who did all their writing
+// early in the week and then went quiet.
+async function getUsersForWeeklyEvaluation() {
+  return prisma.user.findMany({
+    where: { isDeleted: false },
+    select: { id: true, timezone: true },
+  });
 }
 
 // ─── Badges ────────────────────────────────────────────────────────────────────
@@ -596,8 +616,9 @@ module.exports = {
   getMyWeeklyProgress,
   getWeeklyProgressForUsers,
   getWeeklyLeaderboard,
-  // evaluation (for the cron, once built)
+  // evaluation (for the cron)
   evaluateAndRecordWeek,
+  getUsersForWeeklyEvaluation,
   // badges
   getMyBadges,
   claimBadge,

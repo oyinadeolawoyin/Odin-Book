@@ -251,9 +251,12 @@ async function logProgress(userId, data) {
   if (typeof countLogged !== "number" || countLogged < 1)
     throw new Error("Count logged must be a positive number");
 
-  // "add" (default) increases today's count by countLogged.
-  // "remove" decreases it instead — for correcting an earlier over-count.
-  const dir = direction === "remove" ? "remove" : "add";
+  // "replace" (default) sets today's count to exactly countLogged,
+  // overwriting whatever was already logged today. "add" stacks countLogged
+  // on top of today's existing count instead; "remove" subtracts it — both
+  // are opt-in via an explicit direction, for writers who want to build on
+  // today's number rather than have a new entry replace it outright.
+  const dir = direction === "add" ? "add" : direction === "remove" ? "remove" : "replace";
 
   const challenge = await prisma.daysChallenge.findUnique({
     where:   { userId },
@@ -285,17 +288,26 @@ async function logProgress(userId, data) {
     today          = todayInTimezone(timezone, now);
   }
 
-  // Running total for today — add/remove stacks on top of whatever's
-  // already logged for this day, rather than overwriting it.
   const existing      = await prisma.daysChallengeCheckIn.findUnique({
     where: { challengeId_checkInDate: { challengeId: challenge.id, checkInDate: today } },
   });
+
+  // Today's count is set per direction — "replace" (default) overwrites it
+  // outright, "add"/"remove" stack on top of or subtract from whatever's
+  // already logged for the day.
   const prevToday      = existing?.countLogged ?? 0;
-  const signedCount    = dir === "remove" ? -countLogged : countLogged;
+  let newTodayCount;
+  if (dir === "add") {
+    newTodayCount = prevToday + countLogged;
+  } else if (dir === "remove") {
+    newTodayCount = prevToday - countLogged;
+  } else {
+    newTodayCount = countLogged;
+  }
   // A single day's count can't go below 0 — unlike draft plan's running
   // project total, there's no larger running total here to absorb a
   // negative correction into, so the floor has to be on the day itself.
-  const newTodayCount  = Math.max(prevToday + signedCount, 0);
+  newTodayCount        = Math.max(newTodayCount, 0);
   const metGoal        = newTodayCount >= challenge.dailyGoal;
 
   const checkIn = await prisma.daysChallengeCheckIn.upsert({
@@ -315,14 +327,14 @@ async function logProgress(userId, data) {
     },
   });
 
-  // Check if all days are now complete — auto-complete if so. Only an
-  // "add" can ever trigger this; a "remove" can only reduce daysMetGoal.
+  // Check if all days are now complete — auto-complete if so. A "remove"
+  // can only ever reduce daysMetGoal, never complete the challenge.
   const totalDays    = DURATION_DAYS[challenge.duration];
   const updatedLogs  = await prisma.daysChallengeCheckIn.findMany({
     where: { challengeId: challenge.id },
   });
   const daysMetGoal  = updatedLogs.filter((c) => c.metDailyGoal).length;
-  const allDone      = dir === "add" && daysMetGoal >= totalDays;
+  const allDone      = dir !== "remove" && daysMetGoal >= totalDays;
 
   if (allDone) {
     await prisma.daysChallenge.update({

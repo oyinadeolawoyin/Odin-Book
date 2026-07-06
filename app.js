@@ -11,6 +11,7 @@ const { startDaysChallengeReminderCron } = require("./jobs/dayschallengereminder
 const { startDraftPlanReminderCron } = require("./jobs/draftplanremindercron");
 const { startSprintReminderCron } = require("./jobs/sprintremindercron");
 const { startEventFinalizeCron } = require("./jobs/eventcron");
+const { startMiniChallengeCron } = require("./jobs/minichallengecron");
 
 const rateLimit = require("express-rate-limit");
 
@@ -57,6 +58,7 @@ startDaysChallengeReminderCron();
 startDraftPlanReminderCron();
 startSprintReminderCron();
 startEventFinalizeCron();
+startMiniChallengeCron();
 
 app.use("/api/auth",          authRoutes);
 app.use("/api/sprint",        groupSprintRoutes);

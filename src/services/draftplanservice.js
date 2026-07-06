@@ -337,9 +337,12 @@ async function logProgress(userId, data) {
   if (typeof countLogged !== "number" || countLogged < 1)
     throw new Error("Count logged must be a positive number");
 
-  // "add" (default) increases the project total by countLogged.
-  // "remove" decreases it instead — for correcting an earlier over-count.
-  const dir = direction === "remove" ? "remove" : "add";
+  // "replace" (default) sets today's count to exactly countLogged,
+  // overwriting whatever was already logged today. "add" stacks countLogged
+  // on top of today's existing count instead; "remove" subtracts it — both
+  // are opt-in via an explicit direction, for writers who want to build on
+  // today's number rather than have a new entry replace it outright.
+  const dir = direction === "add" ? "add" : direction === "remove" ? "remove" : "replace";
 
   const plan = await prisma.draftPlan.findUnique({
     where:   { userId },
@@ -366,16 +369,25 @@ async function logProgress(userId, data) {
   });
   const totalLogged    = plan.progressLogs.reduce((acc, l) => acc + l.countLogged, 0);
   const prevToday       = existing?.countLogged ?? 0;
-  const signedCount     = dir === "remove" ? -countLogged : countLogged;
-  // Today's stored count can itself go negative (a pure correction day),
-  // but the overall project total never drops below 0.
-  const newTodayCount   = prevToday + signedCount;
+  let newTodayCount;
+  if (dir === "add") {
+    newTodayCount = prevToday + countLogged;
+  } else if (dir === "remove") {
+    // Today's stored count can itself go negative (a pure correction day),
+    // but the overall project total never drops below 0 (handled below).
+    newTodayCount = prevToday - countLogged;
+  } else {
+    // replace — the new entry stands on its own, ignoring whatever was
+    // logged for today before.
+    newTodayCount = countLogged;
+  }
   const newTotal        = Math.max(plan.wordsWrittenSoFar + totalLogged - prevToday + newTodayCount, 0);
 
   // metGoal applies any day the daily goal amount is hit — picked writing
-  // day OR a bonus day — as long as it's a real addition (not a removal).
-  // A bonus day still deserves the same "go treat yourself" moment.
-  const metGoal    = dir === "add" && newTodayCount >= plan.dailyGoal;
+  // day OR a bonus day — as long as it's a real addition, not a removal.
+  // A replaced entry counts here too: if the number the writer just set for
+  // today clears the bar, that's still a goal-met day.
+  const metGoal    = dir !== "remove" && newTodayCount >= plan.dailyGoal;
   const isDraftDone = newTotal >= plan.targetLength;
 
   const log = await prisma.draftProgressLog.upsert({
