@@ -109,11 +109,15 @@ async function deleteCategory(req, res) {
 // ─── Threads ──────────────────────────────────────────────────────────────────
 
 async function createThread(req, res) {
-  const { title, context, isPinned, categoryId, link } = req.body;
+  const { title, context, isPinned, isDeprioritized, categoryId, link } = req.body;
   if (!title)   return res.status(400).json({ message: "Title is required." });
   if (!context) return res.status(400).json({ message: "Context is required." });
 
-  const wantsPinned = (isPinned === "true" || isPinned === true) && req.user.role === "ADMIN";
+  const isAdmin = req.user.role === "ADMIN";
+  const wantsPinned = (isPinned === "true" || isPinned === true) && isAdmin;
+  // Only admins can post a thread as deprioritized (hidden from active/latest/
+  // pinned feeds, still visible at the bottom of the plain thread list).
+  const wantsDeprioritized = (isDeprioritized === "true" || isDeprioritized === true) && isAdmin;
 
   try {
     let mediaUrl = null;
@@ -127,6 +131,7 @@ async function createThread(req, res) {
       mediaUrl,
       link:       link || null,
       isPinned: wantsPinned,
+      isDeprioritized: wantsDeprioritized,
     });
 
     res.status(201).json({ thread });
@@ -223,7 +228,7 @@ async function updateThread(req, res) {
     return res.status(403).json({ message: "Admin access required." });
   }
   const threadId = Number(req.params.threadId);
-  const { title, context, isPinned, categoryId, link } = req.body;
+  const { title, context, isPinned, isDeprioritized, categoryId, link } = req.body;
   try {
     const existing = await threadService.findThread(threadId);
     if (!existing) return res.status(404).json({ message: "Thread not found." });
@@ -238,9 +243,10 @@ async function updateThread(req, res) {
       title,
       context,
       mediaUrl,
-      link:       link !== undefined ? (link || null) : undefined,
-      isPinned:   isPinned   !== undefined ? (isPinned === "true" || isPinned === true) : undefined,
-      categoryId: categoryId !== undefined ? (categoryId ? Number(categoryId) : null) : undefined,
+      link:            link            !== undefined ? (link || null) : undefined,
+      isPinned:        isPinned        !== undefined ? (isPinned === "true" || isPinned === true) : undefined,
+      isDeprioritized: isDeprioritized !== undefined ? (isDeprioritized === "true" || isDeprioritized === true) : undefined,
+      categoryId:      categoryId      !== undefined ? (categoryId ? Number(categoryId) : null) : undefined,
     });
 
     res.status(200).json({ thread });

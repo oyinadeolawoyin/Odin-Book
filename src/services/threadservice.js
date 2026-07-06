@@ -90,6 +90,7 @@ async function getCategories() {
           id: true,
           title: true,
           createdAt: true,
+          isDeprioritized: true,
           comments: {
             select: { createdAt: true },
             orderBy: { createdAt: "desc" },
@@ -108,7 +109,7 @@ async function getCategories() {
   const latestThreadsByCategory = await Promise.all(
     categories.map((cat) =>
       prisma.thread.findMany({
-        where: { categoryId: cat.id },
+        where: { categoryId: cat.id, isDeprioritized: false },
         orderBy: [{ isPinned: "desc" }, { createdAt: "desc" }],
         take: 3,
         include: {
@@ -133,8 +134,11 @@ async function getCategories() {
 
     const totalPosts = threads.length;
 
-    // A thread is "active" if it was created or had a comment within 30 days
+    // A thread is "active" if it was created or had a comment within 30 days.
+    // Deprioritized threads never count toward activePosts, but they do
+    // still count toward totalPosts above.
     const activePosts = threads.filter((t) => {
+      if (t.isDeprioritized) return false;
       if (t.createdAt >= thirtyDaysAgo) return true;
       const lastComment = t.comments[0];
       return lastComment && lastComment.createdAt >= thirtyDaysAgo;
@@ -197,7 +201,7 @@ async function deleteCategory(categoryId) {
 
 // ─── Threads ──────────────────────────────────────────────────────────────────
 
-async function createThread({ authorId, categoryId, title, context, mediaUrl, link, isPinned }) {
+async function createThread({ authorId, categoryId, title, context, mediaUrl, link, isPinned, isDeprioritized }) {
   const thread = await prisma.thread.create({
     data: {
       authorId,
@@ -207,6 +211,7 @@ async function createThread({ authorId, categoryId, title, context, mediaUrl, li
       mediaUrl: mediaUrl || null,
       link: link || null,
       isPinned: isPinned ?? false,
+      isDeprioritized: isDeprioritized ?? false,
     },
     include: {
       author:   { select: AUTHOR_SELECT },
@@ -229,7 +234,10 @@ async function getThreads({ page = 1, limit = 20, categoryId } = {}) {
       where,
       skip,
       take: limit,
-      orderBy: [{ isPinned: "desc" }, { createdAt: "desc" }],
+      // Pinned first, deprioritized threads pushed to the very bottom
+      // (isDeprioritized "asc" puts false before true), newest first within
+      // each group.
+      orderBy: [{ isPinned: "desc" }, { isDeprioritized: "asc" }, { createdAt: "desc" }],
       include: {
         author:   { select: AUTHOR_SELECT },
         category: { select: { id: true, name: true, slug: true } },
@@ -252,6 +260,7 @@ async function getLatestThreads({ page = 1, limit = 20, categoryId } = {}) {
 
   const where = {
     isPinned: false,
+    isDeprioritized: false,
     createdAt: { gte: twoDaysAgo },
     ...(categoryId ? { categoryId } : {}),
   };
@@ -297,7 +306,7 @@ async function getPinnedAndTodayThreads({ limit = 10 } = {}) {
       },
     }),
     prisma.thread.findMany({
-      where: { isPinned: false, createdAt: { gte: startOfToday } },
+      where: { isPinned: false, isDeprioritized: false, createdAt: { gte: startOfToday } },
       orderBy: { createdAt: "desc" },
       include: {
         author:   { select: AUTHOR_SELECT },
@@ -344,6 +353,7 @@ async function getActiveThreads({ limit = 20 } = {}) {
 
   const threads = await prisma.thread.findMany({
     where: {
+      isDeprioritized: false,
       OR: [
         { createdAt: { gte: twoDaysAgo } },
         { comments: { some: { createdAt: { gte: twoDaysAgo } } } },
@@ -388,16 +398,17 @@ async function findThread(threadId) {
   });
 }
 
-async function updateThread(threadId, { title, context, mediaUrl, link, isPinned, categoryId }) {
+async function updateThread(threadId, { title, context, mediaUrl, link, isPinned, isDeprioritized, categoryId }) {
   const thread = await prisma.thread.update({
     where: { id: threadId },
     data: {
-      ...(title      !== undefined && { title }),
-      ...(context    !== undefined && { context }),
-      ...(mediaUrl   !== undefined && { mediaUrl }),
-      ...(link       !== undefined && { link: link || null }),
-      ...(isPinned   !== undefined && { isPinned }),
-      ...(categoryId !== undefined && { categoryId }),
+      ...(title           !== undefined && { title }),
+      ...(context         !== undefined && { context }),
+      ...(mediaUrl        !== undefined && { mediaUrl }),
+      ...(link            !== undefined && { link: link || null }),
+      ...(isPinned        !== undefined && { isPinned }),
+      ...(isDeprioritized !== undefined && { isDeprioritized }),
+      ...(categoryId      !== undefined && { categoryId }),
     },
     include: {
       author:   { select: AUTHOR_SELECT },

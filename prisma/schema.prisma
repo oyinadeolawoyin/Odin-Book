@@ -448,6 +448,8 @@ model Thread {
   mediaUrl   String? 
   link       String?                                    // optional image/attachment
   isPinned   Boolean  @default(false)                    // only admins should pin
+  isDeprioritized Boolean @default(false)                // admin-only: hidden from active/latest/pinned feeds,
+                                                          // still shown (sorted last) in the plain thread list
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -460,6 +462,7 @@ model Thread {
   @@index([categoryId])
   @@index([createdAt])
   @@index([isPinned])
+  @@index([isDeprioritized])
 }
 
 model ThreadLike {
