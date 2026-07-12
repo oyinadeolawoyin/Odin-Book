@@ -25,11 +25,6 @@ const MULTI_CHAPTER_SURCHARGE = 2;
 // QUEUE penalty: critiquing a QUEUE work earns 2 fewer points than full tier cost
 const QUEUE_CRITIQUE_PENALTY = 2;
 
-// Spotlight long-stay bonus: works that have been in SPOTLIGHT for more than this
-// many days earn the critic +2 extra points on top of the normal SPOTLIGHT payout
-const SPOTLIGHT_LONGSTAY_DAYS   = 10;
-const SPOTLIGHT_LONGSTAY_BONUS  = 2;
-
 // Reputation points awarded (and deducted on un-upvote) per critique upvote
 const UPVOTE_REPUTATION_AWARD = 2;
 
@@ -46,18 +41,16 @@ const TIERS = [
  * Calculate points a critic earns for a critique.
  *
  * Status rules:
- *   SPOTLIGHT → full tier points (+ longStayBonus if in SPOTLIGHT > 10 days)
+ *   SPOTLIGHT → full tier points
  *   QUEUE     → full tier points - QUEUE_CRITIQUE_PENALTY (2)
  *   ARCHIVE   → half of full tier points
  *
  * @param {string}   wordCountTier    - Submission's word-count tier (TIER_1000, etc.)
  * @param {string}   submissionStatus - "QUEUE" | "SPOTLIGHT" | "ARCHIVE"
- * @param {Date|null} spotlightSince  - When the submission entered SPOTLIGHT (createdAt
- *                                      or updatedAt); pass null for non-SPOTLIGHT works
  *
- * Returns: { basePoints, longStayBonus, totalPoints, isSpotlight, isLongStay }
+ * Returns: { basePoints, totalPoints, isSpotlight }
  */
-function calculateCritiquePoints(wordCountTier, submissionStatus, spotlightSince = null) {
+function calculateCritiquePoints(wordCountTier, submissionStatus) {
   const full = TIER_COSTS[wordCountTier] || 1;
 
   let base;
@@ -72,20 +65,7 @@ function calculateCritiquePoints(wordCountTier, submissionStatus, spotlightSince
 
   const isSpotlight = submissionStatus === "SPOTLIGHT";
 
-  // Long-stay bonus: SPOTLIGHT work older than SPOTLIGHT_LONGSTAY_DAYS earns +2
-  let longStayBonus = 0;
-  let isLongStay    = false;
-  if (isSpotlight && spotlightSince) {
-    const daysInSpotlight = (Date.now() - new Date(spotlightSince).getTime()) / (1000 * 60 * 60 * 24);
-    if (daysInSpotlight > SPOTLIGHT_LONGSTAY_DAYS) {
-      longStayBonus = SPOTLIGHT_LONGSTAY_BONUS;
-      isLongStay    = true;
-    }
-  }
-
-  const totalPoints = base + longStayBonus;
-
-  return { basePoints: base, longStayBonus, totalPoints, isSpotlight, isLongStay };
+  return { basePoints: base, totalPoints: base, isSpotlight };
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -242,8 +222,6 @@ module.exports = {
   TIER_COSTS,
   MULTI_CHAPTER_SURCHARGE,
   QUEUE_CRITIQUE_PENALTY,
-  SPOTLIGHT_LONGSTAY_DAYS,
-  SPOTLIGHT_LONGSTAY_BONUS,
   BOOTSTRAP_FREE_SLOTS,
   TIERS,
   UPVOTE_REPUTATION_AWARD,

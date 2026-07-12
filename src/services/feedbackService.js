@@ -20,6 +20,16 @@ const GENERAL_FEEDBACK_MIN_WORDS_LONG  = 300; // for chapters ≥ TIER_4000
 // Tiers that require the longer minimum
 const LONG_CRITIQUE_TIERS = new Set(["TIER_4000", "TIER_5000"]);
 
+// Postgres advisory lock key used to serialize any operation that reads the
+// current SPOTLIGHT count and then decides whether to add another submission
+// to it (new submissions, and the queue → spotlight fill-up on page load).
+// Without this, two concurrent operations can each read the same "5 spotlighted"
+// count before either commits, and both promote/assign a chapter to SPOTLIGHT —
+// overshooting the intended 6-slot cap. Shared across both call sites so they
+// can't race against each other either. Value is arbitrary — just needs to be
+// unique within this app so it doesn't collide with an unrelated advisory lock.
+const SPOTLIGHT_LOCK_KEY = 571003;
+
 function countWords(text) {
   // Strip HTML tags (including the data-editor-styles wrapper) before counting
   const plain = text.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ");
@@ -210,6 +220,19 @@ async function createSubmission(userId, data) {
     // already spotlighted, their new chapter must wait in QUEUE — even
     // when open slots exist — and will be promoted once their current
     // spotlight chapter is archived.
+    //
+    // Race-condition guard: two submissions arriving close together can
+    // both read the same "5 spotlighted" count before either has committed
+    // its insert, and both decide SPOTLIGHT — overshooting the 6-slot cap
+    // (e.g. ending up with 7). A plain row lock (SELECT ... FOR UPDATE)
+    // doesn't fully close this gap either, since there may be no existing
+    // SPOTLIGHT rows yet to lock onto when the count is low. A Postgres
+    // advisory lock serializes this whole check-then-insert sequence
+    // regardless of current row count: a second concurrent transaction
+    // simply waits here until the first one commits (releasing the lock),
+    // so it sees the up-to-date count before making its own decision.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SPOTLIGHT_LOCK_KEY})`;
+
     const spotlightCount = await tx.feedbackSubmission.count({
       where: { status: "SPOTLIGHT" },
     });
@@ -385,56 +408,66 @@ async function updateSubmission(submissionId, userId, data) {
 async function getSpotlightSubmissions() {
   // Fill any open spotlight slots from QUEUE before fetching — handles submissions
   // created before the slot-check logic was in place, or any edge-case gaps.
-  const currentSpotlightCount = await prisma.feedbackSubmission.count({
-    where: { status: "SPOTLIGHT", isDraft: false },
-  });
- 
-  const slotsToFill = 7 - currentSpotlightCount;
- 
-  if (slotsToFill > 0) {
-    // Collect authors already occupying a spotlight slot so we don't
-    // give them a second one while they still have a chapter there.
-    const spotlightedAuthorIds = (
-      await prisma.feedbackSubmission.findMany({
-        where:  { status: "SPOTLIGHT", isDraft: false },
-        select: { userId: true },
-      })
-    ).map(s => s.userId);
- 
-    // Pick the oldest QUEUE chapters whose authors aren't already spotlighted,
-    // one per author (deduplicate in JS after the DB fetch).
-    const queueCandidates = await prisma.feedbackSubmission.findMany({
-      where: {
-        status:  "QUEUE",
-        isDraft: false,
-        ...(spotlightedAuthorIds.length > 0 && {
-          userId: { notIn: spotlightedAuthorIds },
-        }),
-      },
-      orderBy: { createdAt: "asc" },
-      // Fetch more than needed so we can deduplicate per-author in JS
-      take: slotsToFill * 5,
+  //
+  // This whole check-then-fill sequence is wrapped in a transaction guarded by
+  // the same advisory lock used in createSubmission. Without it, two people
+  // loading this page at nearly the same moment could both read the same
+  // "spotlight has room" count and both promote overlapping QUEUE chapters —
+  // overshooting the 6-slot cap the same way concurrent submissions could.
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SPOTLIGHT_LOCK_KEY})`;
+
+    const currentSpotlightCount = await tx.feedbackSubmission.count({
+      where: { status: "SPOTLIGHT", isDraft: false },
     });
- 
-    // One chapter per author, oldest first, up to slotsToFill
-    const seenAuthors = new Set();
-    const nextInLine  = [];
-    for (const s of queueCandidates) {
-      if (!seenAuthors.has(s.userId)) {
-        seenAuthors.add(s.userId);
-        nextInLine.push(s);
-      }
-      if (nextInLine.length === slotsToFill) break;
-    }
- 
-    if (nextInLine.length > 0) {
-      await prisma.feedbackSubmission.updateMany({
-        where: { id: { in: nextInLine.map(s => s.id) } },
-        data:  { status: "SPOTLIGHT" },
+
+    const slotsToFill = 6 - currentSpotlightCount;
+
+    if (slotsToFill > 0) {
+      // Collect authors already occupying a spotlight slot so we don't
+      // give them a second one while they still have a chapter there.
+      const spotlightedAuthorIds = (
+        await tx.feedbackSubmission.findMany({
+          where:  { status: "SPOTLIGHT", isDraft: false },
+          select: { userId: true },
+        })
+      ).map(s => s.userId);
+
+      // Pick the oldest QUEUE chapters whose authors aren't already spotlighted,
+      // one per author (deduplicate in JS after the DB fetch).
+      const queueCandidates = await tx.feedbackSubmission.findMany({
+        where: {
+          status:  "QUEUE",
+          isDraft: false,
+          ...(spotlightedAuthorIds.length > 0 && {
+            userId: { notIn: spotlightedAuthorIds },
+          }),
+        },
+        orderBy: { createdAt: "asc" },
+        // Fetch more than needed so we can deduplicate per-author in JS
+        take: slotsToFill * 5,
       });
+
+      // One chapter per author, oldest first, up to slotsToFill
+      const seenAuthors = new Set();
+      const nextInLine  = [];
+      for (const s of queueCandidates) {
+        if (!seenAuthors.has(s.userId)) {
+          seenAuthors.add(s.userId);
+          nextInLine.push(s);
+        }
+        if (nextInLine.length === slotsToFill) break;
+      }
+
+      if (nextInLine.length > 0) {
+        await tx.feedbackSubmission.updateMany({
+          where: { id: { in: nextInLine.map(s => s.id) } },
+          data:  { status: "SPOTLIGHT" },
+        });
+      }
     }
-  }
- 
+  });
+
   // Now fetch the updated spotlight
   const candidates = await prisma.feedbackSubmission.findMany({
     where:   { status: "SPOTLIGHT", isDraft: false },
@@ -452,20 +485,8 @@ async function getSpotlightSubmissions() {
     }
     if (deduped.length === 6) break;
   }
- 
-  // ── Attach isLongStay: true when the submission has been in the spotlight
-  //    for more than 10 days. We use updatedAt (last status change) so that
-  //    a chapter promoted from QUEUE counts from its promotion date, falling
-  //    back to createdAt when updatedAt is unavailable.
-  const TEN_DAYS_MS = 10 * 24 * 60 * 60 * 1000;
-  const now         = Date.now();
- 
-  return deduped.map(sub => {
-    const since      = sub.updatedAt ?? sub.createdAt;
-    const ageMs      = since ? now - new Date(since).getTime() : 0;
-    const isLongStay = ageMs > TEN_DAYS_MS;
-    return { ...sub, isLongStay };
-  });
+
+  return deduped;
 }
 
 // 2. Fetch Outdated (Archive) — supports optional genre filter
@@ -568,11 +589,10 @@ async function createResponse(criticId, submissionId, data) {
     }
   }
 
-  // Calculate critic's points — pass spotlightSince so the long-stay bonus can be applied
+  // Calculate critic's points
   const pointsBreakdown = pointsService.calculateCritiquePoints(
     submission.wordCountTier,
     submission.status,
-    submission.status === "SPOTLIGHT" ? submission.updatedAt : null,
   );
 
   const response = await prisma.$transaction(async (tx) => {
