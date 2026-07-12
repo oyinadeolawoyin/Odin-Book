@@ -120,15 +120,20 @@ async function createThread(req, res) {
   const wantsDeprioritized = (isDeprioritized === "true" || isDeprioritized === true) && isAdmin;
 
   try {
-    let mediaUrl = null;
-    if (req.file) mediaUrl = await uploadFile(req.file);
+    const fileFields = req.files && typeof req.files === "object" && !Array.isArray(req.files)
+      ? Object.values(req.files).flat()
+      : req.files ?? (req.file ? [req.file] : []);
+
+    const mediaUrls = fileFields.length > 0
+      ? await Promise.all(fileFields.map(f => uploadFile(f)))
+      : [];
 
     const thread = await threadService.createThread({
       authorId:   req.user.id,
       categoryId: categoryId ? Number(categoryId) : null,
       title,
       context,
-      mediaUrl,
+      mediaUrls,
       link:       link || null,
       isPinned: wantsPinned,
       isDeprioritized: wantsDeprioritized,
@@ -228,21 +233,43 @@ async function updateThread(req, res) {
     return res.status(403).json({ message: "Admin access required." });
   }
   const threadId = Number(req.params.threadId);
-  const { title, context, isPinned, isDeprioritized, categoryId, link } = req.body;
+  const { title, context, isPinned, isDeprioritized, categoryId, link, existingMediaUrls } = req.body;
   try {
     const existing = await threadService.findThread(threadId);
     if (!existing) return res.status(404).json({ message: "Thread not found." });
 
+    const fileFields = req.files && typeof req.files === "object" && !Array.isArray(req.files)
+      ? Object.values(req.files).flat()
+      : req.files ?? (req.file ? [req.file] : []);
+
+    // existingMediaUrls (sent by the edit form as a JSON array) tells us which
+    // of the thread's current images the writer kept vs. removed. Anything
+    // removed gets deleted from storage; new uploads are appended on top,
+    // capped at 5 total — same limit as comments/replies.
     let mediaUrl;
-    if (req.file) {
-      if (existing.mediaUrl) await deleteFile(existing.mediaUrl);
-      mediaUrl = await uploadFile(req.file);
+    let mediaUrls;
+    if (fileFields.length > 0 || existingMediaUrls !== undefined) {
+      const priorUrls = Array.isArray(existing.mediaUrls) ? existing.mediaUrls
+        : (existing.mediaUrl ? [existing.mediaUrl] : []);
+      let keptUrls = priorUrls;
+      if (existingMediaUrls !== undefined) {
+        try { keptUrls = JSON.parse(existingMediaUrls); } catch { keptUrls = priorUrls; }
+      }
+      const removedUrls = priorUrls.filter(u => !keptUrls.includes(u));
+      await Promise.all(removedUrls.map(u => deleteFile(u)));
+
+      const uploadedUrls = fileFields.length > 0
+        ? await Promise.all(fileFields.map(f => uploadFile(f)))
+        : [];
+      mediaUrls = [...keptUrls, ...uploadedUrls].slice(0, 5);
+      mediaUrl  = mediaUrls[0] ?? null;
     }
 
     const thread = await threadService.updateThread(threadId, {
       title,
       context,
       mediaUrl,
+      mediaUrls,
       link:            link            !== undefined ? (link || null) : undefined,
       isPinned:        isPinned        !== undefined ? (isPinned === "true" || isPinned === true) : undefined,
       isDeprioritized: isDeprioritized !== undefined ? (isDeprioritized === "true" || isDeprioritized === true) : undefined,
@@ -431,7 +458,7 @@ async function getReplies(req, res) {
 async function addReply(req, res) {
   const commentId = Number(req.params.commentId);
   const authorId  = req.user.id;
-  const { content } = req.body;
+  const { content, parentId } = req.body;
 
   if (!content) return res.status(400).json({ message: "Content is required." });
 
@@ -446,6 +473,17 @@ async function addReply(req, res) {
     const comment = await threadService.findComment(commentId);
     if (!comment) return res.status(404).json({ message: "Comment not found." });
 
+    // If this is a reply-to-a-reply, make sure the parent reply is real and
+    // actually belongs to this comment thread before nesting under it.
+    let normalizedParentId = null;
+    if (parentId) {
+      const parentReply = await threadService.findReply(Number(parentId));
+      if (!parentReply || parentReply.commentId !== commentId) {
+        return res.status(400).json({ message: "Invalid reply target." });
+      }
+      normalizedParentId = parentReply.id;
+    }
+
     const fileFields = req.files && typeof req.files === "object" && !Array.isArray(req.files)
       ? Object.values(req.files).flat()
       : req.files ?? (req.file ? [req.file] : []);
@@ -454,7 +492,7 @@ async function addReply(req, res) {
       ? await Promise.all(fileFields.map(f => uploadFile(f)))
       : [];
 
-    const reply = await threadService.addReply(commentId, authorId, content, mediaUrls);
+    const reply = await threadService.addReply(commentId, authorId, content, mediaUrls, normalizedParentId);
     res.status(201).json({ reply });
 
     if (comment.authorId && comment.authorId !== authorId) {

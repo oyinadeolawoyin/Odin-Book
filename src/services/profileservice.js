@@ -13,6 +13,10 @@
 //   - threadCommentCount (public)
 //   - draftPlan (story title, premise, characters — visible to all)
 //   - daysChallenge (active only — title, duration, startDate, status, focuses)
+//   - sprintCount (total Sprint rows for this user — covers solo-started AND
+//     group-joined sprints, since joining a group sprint also creates a
+//     Sprint row for the joiner)
+//   - draftCount (total WritingDraft rows for this user)
 //
 // Owner-only fields are fetched separately via their own authenticated routes
 // (posting balance, blocked users, full plan details).
@@ -47,6 +51,8 @@ async function getPublicProfile(targetUserId) {
     threadCommentCount,
     draftPlan,
     daysChallenge,
+    sprintCount,
+    draftCount,
   ] = await Promise.all([
     // ── User ──────────────────────────────────────────────────────────────────
     prisma.user.findUnique({
@@ -143,6 +149,15 @@ async function getPublicProfile(targetUserId) {
         focuses: { select: { focus: true } },
       },
     }),
+
+    // ── Sprint count (covers both starting a solo sprint and joining a group
+    //    sprint — both create a Sprint row for the user) — powers the
+    //    "Start your first sprint" checklist item ──────────────────────────
+    prisma.sprint.count({ where: { userId } }),
+
+    // ── Writing draft count — powers the "Create your first draft" checklist
+    //    item ──────────────────────────────────────────────────────────────
+    prisma.writingDraft.count({ where: { userId } }),
   ]);
 
   if (!user) throw new Error("User not found");
@@ -172,6 +187,8 @@ async function getPublicProfile(targetUserId) {
     threadCommentCount,
     draftPlan:    draftPlan  ?? null,
     daysChallenge: (daysChallenge?.status === "ACTIVE") ? daysChallenge : null,
+    sprintCount,
+    draftCount,
   };
 }
 

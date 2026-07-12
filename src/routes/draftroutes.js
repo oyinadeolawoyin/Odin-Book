@@ -32,6 +32,7 @@ router.post("/unpublish/:submissionId", authenticateJWT, ctrl.unpublishSubmissio
 
 router.get("/",                     authenticateJWT, ctrl.getUserDrafts);
 router.post("/",                    authenticateJWT, ctrl.createDraft);
+router.patch("/:draftId/star",      authenticateJWT, ctrl.toggleStar);
 router.get("/:draftId",             authenticateJWT, ctrl.getDraftById);
 router.patch("/:draftId",           authenticateJWT, ctrl.updateDraft);
 router.delete("/:draftId",          authenticateJWT, ctrl.deleteDraft);
@@ -43,5 +44,14 @@ router.post("/:draftId/republish",  authenticateJWT, ctrl.republishDraft);
 
 // Post a fresh draft as a new critique hub submission
 router.post("/:draftId/post-to-hub", authenticateJWT, ctrl.postDraftToHub);
+
+// ─── STICKY NOTES (writer-private "what to fix/add" notes) ──────────────────
+// Only ever exist on WritingDraft rows — cascade-deleted the moment a draft
+// becomes a live submission, so they never show up in the feedback stage.
+
+router.get("/:draftId/sticky-notes",           authenticateJWT, ctrl.getStickyNotes);
+router.post("/:draftId/sticky-notes",          authenticateJWT, ctrl.createStickyNote);
+router.patch("/:draftId/sticky-notes/:noteId", authenticateJWT, ctrl.updateStickyNote);
+router.delete("/:draftId/sticky-notes/:noteId",authenticateJWT, ctrl.deleteStickyNote);
 
 module.exports = router;

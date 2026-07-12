@@ -25,6 +25,16 @@ router.post(  "/categories",             authenticateJWT, threadController.creat
 router.put(   "/categories/:categoryId", authenticateJWT, threadController.updateCategory);
 router.delete("/categories/:categoryId", authenticateJWT, threadController.deleteCategory);
 
+// Shared multi-image upload config — up to five images per post, used for
+// thread posts, comments, and replies alike.
+const MEDIA_FIELDS = [
+  { name: "media_0", maxCount: 1 },
+  { name: "media_1", maxCount: 1 },
+  { name: "media_2", maxCount: 1 },
+  { name: "media_3", maxCount: 1 },
+  { name: "media_4", maxCount: 1 },
+];
+
 // ─── Threads ──────────────────────────────────────────────────────────────────
 // Any authenticated member can create a thread.
 // Only admins can update (edit/pin) or delete any thread.
@@ -38,21 +48,13 @@ router.get(   "/latest",           threadController.getLatestThreads);
 router.get(   "/active",           threadController.getActiveThreads);
 router.get(   "/",          threadController.getThreads);
 router.get(   "/:threadId", threadController.getThread);
-router.post(  "/",          authenticateJWT, upload.single("media"), threadController.createThread);
-router.put(   "/:threadId", authenticateJWT, upload.single("media"), threadController.updateThread);
-router.delete("/:threadId", authenticateJWT,                         threadController.deleteThread);
+router.post(  "/",          authenticateJWT, upload.fields(MEDIA_FIELDS), threadController.createThread);
+router.put(   "/:threadId", authenticateJWT, upload.fields(MEDIA_FIELDS), threadController.updateThread);
+router.delete("/:threadId", authenticateJWT,                              threadController.deleteThread);
 
 router.post("/:threadId/like", authenticateJWT, threadController.toggleLike);
 
 // ─── Comments (public read, authenticated write) ───────────────────────────────
-
-const MEDIA_FIELDS = [
-  { name: "media_0", maxCount: 1 },
-  { name: "media_1", maxCount: 1 },
-  { name: "media_2", maxCount: 1 },
-  { name: "media_3", maxCount: 1 },
-  { name: "media_4", maxCount: 1 },
-];
 
 router.get(   "/:threadId/comments",              threadController.getComments);
 router.post(  "/:threadId/comments",              authenticateJWT, upload.fields(MEDIA_FIELDS), threadController.addComment);

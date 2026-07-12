@@ -31,12 +31,34 @@ async function getUserDrafts(req, res) {
   const userId = Number(req.user.id);
   const page   = Number(req.query.page)  || 1;
   const limit  = Number(req.query.limit) || 20;
+  const starredOnly = req.query.starredOnly === "true";
 
   try {
-    const result = await draftService.getUserDrafts(userId, { page, limit });
+    const result = await draftService.getUserDrafts(userId, { page, limit, starredOnly });
     res.status(200).json(result);
   } catch (error) {
     console.error("Get drafts error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
+/**
+ * PATCH /drafts/:draftId/star
+ * Toggle whether a draft is starred (priority drafts sort to the top of
+ * the drafts list and can be filtered to on their own).
+ */
+async function toggleStar(req, res) {
+  const userId  = Number(req.user.id);
+  const draftId = Number(req.params.draftId);
+
+  try {
+    const draft = await draftService.toggleDraftStar(draftId, userId);
+    res.status(200).json({ draft });
+  } catch (error) {
+    if (error.message === "Draft not found.") {
+      return res.status(404).json({ message: error.message });
+    }
+    console.error("Toggle draft star error:", error);
     res.status(500).json({ message: "Something went wrong. Please try again later." });
   }
 }
@@ -376,11 +398,107 @@ async function sprintAutoSave(req, res) {
   }
 }
 
+// ─── STICKY NOTES ─────────────────────────────────────────────────────────────
+
+/**
+ * GET /drafts/:draftId/sticky-notes
+ * All sticky notes for a draft (both whole-draft and per-paragraph),
+ * for the right-side panel to group and render.
+ */
+async function getStickyNotes(req, res) {
+  const userId  = Number(req.user.id);
+  const draftId = Number(req.params.draftId);
+
+  try {
+    const notes = await draftService.getStickyNotes(draftId, userId);
+    res.status(200).json({ notes });
+  } catch (error) {
+    if (error.message === "Draft not found.") {
+      return res.status(404).json({ message: error.message });
+    }
+    console.error("Get sticky notes error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
+/**
+ * POST /drafts/:draftId/sticky-notes
+ * Create a sticky note. Body: { paragraphIndex?, color?, text?, items? }
+ * Omit paragraphIndex (or send null) for a whole-draft note.
+ */
+async function createStickyNote(req, res) {
+  const userId  = Number(req.user.id);
+  const draftId = Number(req.params.draftId);
+  const { paragraphIndex, color, text, items } = req.body;
+
+  try {
+    const note = await draftService.createStickyNote(draftId, userId, {
+      paragraphIndex, color, text, items,
+    });
+    res.status(201).json({ note });
+  } catch (error) {
+    if (
+      error.message === "Draft not found." ||
+      error.message.startsWith("A sticky note needs")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+    console.error("Create sticky note error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
+/**
+ * PATCH /drafts/:draftId/sticky-notes/:noteId
+ * Body: { color?, text?, items? }
+ */
+async function updateStickyNote(req, res) {
+  const userId  = Number(req.user.id);
+  const draftId = Number(req.params.draftId);
+  const noteId  = Number(req.params.noteId);
+  const { color, text, items } = req.body;
+
+  try {
+    const note = await draftService.updateStickyNote(draftId, noteId, userId, { color, text, items });
+    res.status(200).json({ note });
+  } catch (error) {
+    if (error.message === "Draft not found." || error.message === "Sticky note not found.") {
+      return res.status(404).json({ message: error.message });
+    }
+    if (error.message.startsWith("A sticky note needs")) {
+      return res.status(400).json({ message: error.message });
+    }
+    console.error("Update sticky note error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
+/**
+ * DELETE /drafts/:draftId/sticky-notes/:noteId
+ */
+async function deleteStickyNote(req, res) {
+  const userId  = Number(req.user.id);
+  const draftId = Number(req.params.draftId);
+  const noteId  = Number(req.params.noteId);
+
+  try {
+    await draftService.deleteStickyNote(draftId, noteId, userId);
+    res.status(200).json({ deleted: true });
+  } catch (error) {
+    if (error.message === "Draft not found." || error.message === "Sticky note not found.") {
+      return res.status(404).json({ message: error.message });
+    }
+    console.error("Delete sticky note error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 module.exports = {
   createDraft,
   getUserDrafts,
+  toggleStar,
   getDraftById,
   getDraftsForSprintPicker,
   updateDraft,
@@ -391,4 +509,8 @@ module.exports = {
   getStagedDraft,
   stageDraftForFeedback,
   sprintAutoSave,
+  getStickyNotes,
+  createStickyNote,
+  updateStickyNote,
+  deleteStickyNote,
 };

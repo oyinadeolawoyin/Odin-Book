@@ -19,12 +19,14 @@ router.post("/startGroupSprint", authenticateJWT, groupSprintController.startGro
 
 // ─── SPRINT ───────────────────────────────────────────────────
 router.get("/loginUserSession", authenticateJWT, groupSprintController.fetchLoginUserSprint);
+router.get("/history", authenticateJWT, groupSprintController.fetchUserSprintHistory);
+router.get("/heatmap", authenticateJWT, groupSprintController.fetchUserSprintHeatmap);
 router.post("/join", authenticateJWT, groupSprintController.joinSprint);
 router.post("/:sprintId/checkout", authenticateJWT, groupSprintController.checkoutSprint);
 
 // ─── Dynamic routes last ──────────────────────────────────────
 router.get("/:groupSprintId/livekit-token", authenticateJWT, groupSprintController.getLiveKitToken);
 router.get("/:groupSprintId", authenticateJWT, groupSprintController.fetchGroupSprint);
-router.post("/:groupSprintId/endGroupSprint", authenticateJWT, groupSprintController.endGroupSprint);
+router.post("/:groupSprintIdendGroupSprint", authenticateJWT, groupSprintController.endGroupSprint);
 
 module.exports = router;

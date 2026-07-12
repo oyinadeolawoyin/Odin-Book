@@ -1,5 +1,17 @@
 const prisma = require("../config/prismaClient");
 
+// "YYYY-MM-DD" for a given Date, in a given IANA timezone — used so a
+// writer's streak/heatmap is bucketed by *their* calendar day, not the
+// server's (UTC). en-CA gives YYYY-MM-DD ordering directly.
+function localDateKey(date, timeZone) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+  } catch {
+    // Unknown/invalid timezone string — fall back to UTC rather than throwing.
+    return new Intl.DateTimeFormat("en-CA", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+  }
+}
+
 // ─── AUTO-END STALE SPRINTS ───────────────────────────────────
 // Called before any read that returns active sprints.
 // Ends any GroupSprint whose (startedAt + duration + 10 min grace) has passed.
@@ -218,6 +230,74 @@ async function fetchLoginUserSprint(userId) {
   });
 }
 
+// ─── SPRINT HISTORY & HEATMAP ──────────────────────────────────
+// Powers the drafts page's "your sprint activity" section — a recent-
+// sprints list plus a GitHub-style calendar heatmap of writing days.
+
+// Most recent completed sprints for a writer, newest first. Pass `days` to
+// scope this to a rolling window (e.g. the last 7 days) instead of just
+// capping by row count — used by the drafts page's "recent sprints" list.
+async function fetchUserSprintHistory(userId, { limit = 20, days } = {}) {
+  const where = { userId, completedAt: { not: null } };
+
+  if (days) {
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+    since.setHours(0, 0, 0, 0);
+    where.completedAt = { not: null, gte: since };
+  }
+
+  return prisma.sprint.findMany({
+    where,
+    orderBy: { completedAt: "desc" },
+    take: limit,
+    select: {
+      id: true,
+      checkin: true,
+      wordsWritten: true,
+      startedAt: true,
+      completedAt: true,
+      groupSprintId: true,
+      groupSprint: { select: { duration: true, sprintType: true } },
+    },
+  });
+}
+
+// Daily totals of words written over the last `days` days, keyed by
+// "YYYY-MM-DD" in the writer's own timezone (User.timezone) — the frontend
+// maps these into heatmap cell intensities and computes the day streak
+// from the same keys, so a sprint logged late at night still lands on the
+// day the writer experienced it as, not whatever day it happened to be
+// in UTC on the server.
+//
+// `total` is a separate, unbounded COUNT of every completed sprint the
+// writer has ever done — not capped by `days` (which only controls how
+// far back the calendar/heatmap itself renders) and not capped by any
+// page-size limit, so "sprints total" on the dashboard is always exact.
+async function fetchUserSprintHeatmap(userId, { days = 182 } = {}) {
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  since.setHours(0, 0, 0, 0);
+
+  const [user, sprints, total] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, select: { timezone: true } }),
+    prisma.sprint.findMany({
+      where: { userId, completedAt: { gte: since, not: null } },
+      select: { completedAt: true, wordsWritten: true },
+    }),
+    prisma.sprint.count({ where: { userId, completedAt: { not: null } } }),
+  ]);
+  const timezone = user?.timezone || "UTC";
+
+  const byDay = {};
+  for (const s of sprints) {
+    const key = localDateKey(s.completedAt, timezone);
+    byDay[key] = (byDay[key] || 0) + (s.wordsWritten || 0);
+  }
+
+  return { heatmap: byDay, total };
+}
+
 module.exports = {
   startGroupSprint,
   endGroupSprint,
@@ -227,5 +307,7 @@ module.exports = {
   joinSprint,
   checkoutSprint,
   fetchLoginUserSprint,
+  fetchUserSprintHistory,
+  fetchUserSprintHeatmap,
   autoEndStaleSprints,
 };

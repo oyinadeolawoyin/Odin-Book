@@ -44,13 +44,14 @@ async function createDraft(userId, { title = null, content = "" } = {}) {
 
 // ─── READ ─────────────────────────────────────────────────────────────────────
 
-async function getUserDrafts(userId, { page = 1, limit = 20 } = {}) {
+async function getUserDrafts(userId, { page = 1, limit = 20, starredOnly = false } = {}) {
   const skip = (page - 1) * limit;
+  const where = { userId, ...(starredOnly ? { isStarred: true } : {}) };
 
   const [items, total] = await Promise.all([
     prisma.writingDraft.findMany({
-      where:   { userId },
-      orderBy: { updatedAt: "desc" },
+      where,
+      orderBy: [{ isStarred: "desc" }, { updatedAt: "desc" }],
       skip,
       take: limit,
       select: {
@@ -60,6 +61,7 @@ async function getUserDrafts(userId, { page = 1, limit = 20 } = {}) {
         createdAt:           true,
         updatedAt:           true,
         sourceSubmissionId:  true,
+        isStarred:           true,
         // Staging fields — let the drafts page tell a chapter that's
         // genuinely staged-and-waiting-on-points apart from an ordinary
         // work-in-progress draft, and post it directly without re-opening
@@ -83,10 +85,26 @@ async function getUserDrafts(userId, { page = 1, limit = 20 } = {}) {
         },
       },
     }),
-    prisma.writingDraft.count({ where: { userId } }),
+    prisma.writingDraft.count({ where }),
   ]);
 
   return { items, total, page, pages: Math.ceil(total / limit) };
+}
+
+// ─── STAR ─────────────────────────────────────────────────────────────────────
+
+async function toggleDraftStar(draftId, userId) {
+  const draft = await prisma.writingDraft.findFirst({
+    where: { id: draftId, userId },
+    select: { isStarred: true },
+  });
+  if (!draft) throw new Error("Draft not found.");
+
+  return prisma.writingDraft.update({
+    where: { id: draftId },
+    data: { isStarred: !draft.isStarred },
+    select: { id: true, isStarred: true },
+  });
 }
 
 async function getDraftById(draftId, userId) {
@@ -360,6 +378,95 @@ async function sprintAutoSave(userId, { draftId, title, content }) {
   });
 }
 
+// ─── STICKY NOTES ─────────────────────────────────────────────────────────────
+//
+// Writer-private scratch notes on a draft. paragraphIndex === null/undefined
+// means a whole-draft note; any other integer is a paragraph note. These only
+// ever exist on WritingDraft rows, so they naturally vanish (cascade delete)
+// the moment a draft becomes a live submission (postDraftToHub / republishDraft
+// both delete the WritingDraft row) — that's what keeps them out of the
+// feedback/critique stage without any extra flag to check.
+
+const STICKY_NOTE_COLORS = ["YELLOW", "PINK", "BLUE", "GREEN", "PURPLE", "ORANGE"];
+
+async function assertOwnsDraft(draftId, userId) {
+  const draft = await prisma.writingDraft.findFirst({ where: { id: draftId, userId } });
+  if (!draft) throw new Error("Draft not found.");
+  return draft;
+}
+
+function normalizeItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map(i => String(i).trim()).filter(Boolean).slice(0, 50);
+}
+
+async function getStickyNotes(draftId, userId) {
+  await assertOwnsDraft(draftId, userId);
+  return prisma.stickyNote.findMany({
+    where:   { draftId },
+    orderBy: [{ paragraphIndex: "asc" }, { createdAt: "asc" }],
+  });
+}
+
+async function createStickyNote(draftId, userId, {
+  paragraphIndex = null,
+  color = "YELLOW",
+  text = "",
+  items = [],
+} = {}) {
+  await assertOwnsDraft(draftId, userId);
+
+  const cleanText  = (text || "").trim();
+  const cleanItems = normalizeItems(items);
+  if (!cleanText && cleanItems.length === 0) {
+    throw new Error("A sticky note needs some text or at least one list item.");
+  }
+
+  const cleanColor = STICKY_NOTE_COLORS.includes(color) ? color : "YELLOW";
+  const cleanIndex = paragraphIndex === null || paragraphIndex === undefined
+    ? null
+    : Math.max(0, Number(paragraphIndex) || 0);
+
+  return prisma.stickyNote.create({
+    data: {
+      draftId,
+      userId,
+      paragraphIndex: cleanIndex,
+      color:          cleanColor,
+      text:           cleanText,
+      items:          cleanItems,
+    },
+  });
+}
+
+async function updateStickyNote(draftId, noteId, userId, { color, text, items } = {}) {
+  await assertOwnsDraft(draftId, userId);
+  const note = await prisma.stickyNote.findFirst({ where: { id: noteId, draftId } });
+  if (!note) throw new Error("Sticky note not found.");
+
+  const data = {};
+  if (color !== undefined) data.color = STICKY_NOTE_COLORS.includes(color) ? color : note.color;
+  if (text  !== undefined) data.text  = (text || "").trim();
+  if (items !== undefined) data.items = normalizeItems(items);
+
+  // Guard against ending up with a fully empty note
+  const nextText  = data.text  !== undefined ? data.text  : note.text;
+  const nextItems = data.items !== undefined ? data.items : note.items;
+  if (!nextText && nextItems.length === 0) {
+    throw new Error("A sticky note needs some text or at least one list item.");
+  }
+
+  return prisma.stickyNote.update({ where: { id: noteId }, data });
+}
+
+async function deleteStickyNote(draftId, noteId, userId) {
+  await assertOwnsDraft(draftId, userId);
+  const note = await prisma.stickyNote.findFirst({ where: { id: noteId, draftId } });
+  if (!note) throw new Error("Sticky note not found.");
+  await prisma.stickyNote.delete({ where: { id: noteId } });
+  return { deleted: true };
+}
+
 // ─── HELPER ───────────────────────────────────────────────────────────────────
 
 function countWords(text = "") {
@@ -371,6 +478,7 @@ function countWords(text = "") {
 module.exports = {
   createDraft,
   getUserDrafts,
+  toggleDraftStar,
   getDraftById,
   getDraftsForSprintPicker,
   updateDraft,
@@ -381,4 +489,8 @@ module.exports = {
   stageDraftForFeedback,
   getStagedDraft,
   sprintAutoSave,
+  getStickyNotes,
+  createStickyNote,
+  updateStickyNote,
+  deleteStickyNote,
 };

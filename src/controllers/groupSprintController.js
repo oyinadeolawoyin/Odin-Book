@@ -146,6 +146,33 @@ async function fetchLoginUserSprint(req, res) {
   }
 }
 
+// ─── SPRINT HISTORY & HEATMAP ──────────────────────────────────
+
+async function fetchUserSprintHistory(req, res) {
+  const userId = Number(req.user.id);
+  const limit  = Number(req.query.limit) || 20;
+  const days   = req.query.days != null ? Number(req.query.days) : undefined;
+  try {
+    const sprints = await groupSprintService.fetchUserSprintHistory(userId, { limit, days });
+    res.status(200).json({ sprints });
+  } catch (error) {
+    console.error("Fetch sprint history error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
+async function fetchUserSprintHeatmap(req, res) {
+  const userId = Number(req.user.id);
+  const days   = Number(req.query.days) || 182;
+  try {
+    const { heatmap, total } = await groupSprintService.fetchUserSprintHeatmap(userId, { days });
+    res.status(200).json({ heatmap, sprintsTotal: total });
+  } catch (error) {
+    console.error("Fetch sprint heatmap error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
 // ─── LIVEKIT TOKEN ────────────────────────────────────────────
 
 async function getLiveKitToken(req, res) {
@@ -197,5 +224,7 @@ module.exports = {
   joinSprint,
   checkoutSprint,
   fetchLoginUserSprint,
+  fetchUserSprintHistory,
+  fetchUserSprintHeatmap,
   getLiveKitToken,
 };

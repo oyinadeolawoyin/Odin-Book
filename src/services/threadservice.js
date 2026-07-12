@@ -201,14 +201,15 @@ async function deleteCategory(categoryId) {
 
 // ─── Threads ──────────────────────────────────────────────────────────────────
 
-async function createThread({ authorId, categoryId, title, context, mediaUrl, link, isPinned, isDeprioritized }) {
+async function createThread({ authorId, categoryId, title, context, mediaUrl, mediaUrls = [], link, isPinned, isDeprioritized }) {
   const thread = await prisma.thread.create({
     data: {
       authorId,
       categoryId: categoryId ?? null,
       title,
       context,
-      mediaUrl: mediaUrl || null,
+      mediaUrl: mediaUrl || mediaUrls[0] || null,
+      mediaUrls: mediaUrls.length > 0 ? mediaUrls : [],
       link: link || null,
       isPinned: isPinned ?? false,
       isDeprioritized: isDeprioritized ?? false,
@@ -394,17 +395,18 @@ async function getThread(threadId) {
 async function findThread(threadId) {
   return prisma.thread.findUnique({
     where: { id: threadId },
-    select: { id: true, authorId: true, title: true, mediaUrl: true, categoryId: true },
+    select: { id: true, authorId: true, title: true, mediaUrl: true, mediaUrls: true, categoryId: true },
   });
 }
 
-async function updateThread(threadId, { title, context, mediaUrl, link, isPinned, isDeprioritized, categoryId }) {
+async function updateThread(threadId, { title, context, mediaUrl, mediaUrls, link, isPinned, isDeprioritized, categoryId }) {
   const thread = await prisma.thread.update({
     where: { id: threadId },
     data: {
       ...(title           !== undefined && { title }),
       ...(context         !== undefined && { context }),
       ...(mediaUrl        !== undefined && { mediaUrl }),
+      ...(mediaUrls       !== undefined && { mediaUrls }),
       ...(link            !== undefined && { link: link || null }),
       ...(isPinned        !== undefined && { isPinned }),
       ...(isDeprioritized !== undefined && { isDeprioritized }),
@@ -541,10 +543,11 @@ async function getReplies(commentId, { page = 1, limit = 20 } = {}) {
   return { replies, total, page, totalPages: Math.ceil(total / limit) };
 }
 
-async function addReply(commentId, authorId, content, mediaUrls = []) {
+async function addReply(commentId, authorId, content, mediaUrls = [], parentId = null) {
   return prisma.threadReply.create({
     data: {
       commentId,
+      parentId: parentId ?? null,
       authorId,
       content,
       mediaUrl:  mediaUrls[0] ?? null,
@@ -554,6 +557,15 @@ async function addReply(commentId, authorId, content, mediaUrls = []) {
       author: { select: AUTHOR_SELECT },
       _count: { select: { likes: true } },
     },
+  });
+}
+
+/** Looks up a reply's commentId — used to validate that a parentId being
+ * replied to actually belongs to the comment thread the request claims. */
+async function findReply(replyId) {
+  return prisma.threadReply.findUnique({
+    where: { id: replyId },
+    select: { id: true, commentId: true },
   });
 }
 
@@ -702,6 +714,7 @@ module.exports = {
   // replies
   getReplies,
   addReply,
+  findReply,
   findReply,
   deleteReply,
   toggleReplyLike,

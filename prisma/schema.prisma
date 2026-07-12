@@ -445,7 +445,8 @@ model Thread {
   categoryId Int?                                        // null = "uncategorised"
   title      String
   context    String                                      // body of the thread
-  mediaUrl   String? 
+  mediaUrl   String?                                     // first image — kept for back-compat with old cards/notifications
+  mediaUrls  Json     @default("[]")                     // full image set, same pattern as ThreadComment/ThreadReply
   link       String?                                    // optional image/attachment
   isPinned   Boolean  @default(false)                    // only admins should pin
   isDeprioritized Boolean @default(false)                // admin-only: hidden from active/latest/pinned feeds,
@@ -513,6 +514,10 @@ model ThreadCommentLike {
 model ThreadReply {
   id        Int      @id @default(autoincrement())
   commentId Int
+  // Self-reference for Reddit-style nested threading. Null = a direct reply
+  // to the top-level comment. Non-null = a reply to another reply, letting
+  // the thread nest arbitrarily deep instead of staying a flat list.
+  parentId  Int?
   authorId  Int?    // nullable — preserved if user deleted
   content   String
   mediaUrl   String?
@@ -520,11 +525,14 @@ model ThreadReply {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  comment ThreadComment    @relation(fields: [commentId], references: [id], onDelete: Cascade)
-  author  User?            @relation(fields: [authorId], references: [id], onDelete: SetNull)
-  likes   ThreadReplyLike[]
+  comment  ThreadComment     @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  parent   ThreadReply?      @relation("ReplyToReply", fields: [parentId], references: [id], onDelete: Cascade)
+  children ThreadReply[]     @relation("ReplyToReply")
+  author   User?             @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  likes    ThreadReplyLike[]
 
   @@index([commentId])
+  @@index([parentId])
   @@index([authorId])
 }
 
@@ -1174,6 +1182,12 @@ model WritingDraft {
   content              String              @default("")
   wordCount            Int                 @default(0)
 
+  // Writer-only scratch notes ("what to fix/add") — draft-overall (paragraphIndex
+  // null) or attached to a specific paragraph. Cascades away with the draft row,
+  // so they naturally disappear the moment a chapter is posted/republished to
+  // the Critique Hub (see StickyNote model for the reasoning).
+  stickyNotes          StickyNote[]
+
   // If this draft came from unpublishing a submission, link it
   sourceSubmissionId   Int?                @unique
 
@@ -1198,6 +1212,10 @@ model WritingDraft {
   stagedFeedbackWanted  String[]       @default([])
   stagedAt              DateTime?
 
+  // Lets a writer flag a draft as a priority — starred drafts sort to the
+  // top of the drafts list and can be filtered to on their own.
+  isStarred            Boolean             @default(false)
+
   createdAt            DateTime            @default(now())
   updatedAt            DateTime            @updatedAt
 
@@ -1207,6 +1225,44 @@ model WritingDraft {
   @@index([userId])
   @@index([createdAt])
   @@index([userId, isStagedForFeedback])
+  @@index([userId, isStarred])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STICKY NOTES
+//
+// Writer-private scratch notes for a draft — "what do I still want to fix or
+// add here". Two flavors, distinguished only by paragraphIndex:
+//   - paragraphIndex = null  → attached to the draft as a whole
+//   - paragraphIndex = 0..n  → attached to a specific paragraph in the editor
+//
+// Deliberately minimal: a colour, some free text, and/or a short checklist of
+// items. No threading, no mentions, no critique-hub visibility — these are
+// never shown to anyone but the draft's own writer, and only while the
+// underlying WritingDraft row exists. The moment a chapter is posted or
+// republished to the Critique Hub, its WritingDraft row (and therefore every
+// StickyNote on it, via cascade) is deleted — so sticky notes never carry
+// over into the feedback/critique stage. If the writer later unpublishes the
+// chapter back into a draft, they start with a clean slate of notes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model StickyNote {
+  id             Int             @id @default(autoincrement())
+  draftId        Int
+  userId         Int                              // draft owner; denormalized for convenient auth checks
+
+  paragraphIndex Int?                              // null = whole-draft note; otherwise 0-based paragraph position
+  color          StickyNoteColor @default(YELLOW)
+  text           String          @default("")
+  items          String[]        @default([])      // short checklist lines, e.g. "Tighten this dialogue"
+
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  draft          WritingDraft    @relation(fields: [draftId], references: [id], onDelete: Cascade)
+
+  @@index([draftId])
+  @@index([draftId, paragraphIndex])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1304,4 +1360,13 @@ enum DaysChallengeFocus {
   BRAINSTORMING
   EDITING
   STORY_DEVELOPMENT
+}
+
+enum StickyNoteColor {
+  YELLOW
+  PINK
+  BLUE
+  GREEN
+  PURPLE
+  ORANGE
 }
