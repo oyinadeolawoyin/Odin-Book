@@ -4,10 +4,34 @@ const { notifyUser } = require("../services/notificationService");
 
 // ─── Word limit helper ────────────────────────────────────────────────────────
 
-const COMMENT_WORD_LIMIT = 200;
+const WORD_LIMIT = 200; // applies to threads, comments, and replies alike
 
 function countWords(str) {
   return str.trim().split(/\s+/).filter(Boolean).length;
+}
+
+// ─── Tags ─────────────────────────────────────────────────────────────────────
+// Replaces the old admin-managed ThreadCategory system with a fixed, flat
+// set of tags any member can pick from when posting. "All" is a frontend-only
+// filter value, not a storable tag.
+
+const THREAD_TAGS = [
+  "First Draft",
+  "Craft",
+  "Feedback",
+  "Snippet",
+  "Wins",
+  "Struggle",
+  "Tips",
+  "Check-in",
+  "Resources",
+  "Question",
+  "Off-topic",
+  "Newcomer",
+];
+
+function isValidTag(tag) {
+  return THREAD_TAGS.includes(tag);
 }
 
 // ─── Mention helpers ──────────────────────────────────────────────────────────
@@ -29,89 +53,22 @@ async function notifyMentions(content, authorId, linkUrl) {
   );
 }
 
-// ─── Thread Categories (admin write, public read) ─────────────────────────────
-
-async function getCategories(req, res) {
-  try {
-    const categories = await threadService.getCategories();
-    res.status(200).json({ categories });
-  } catch (error) {
-    console.error("Get categories error:", error);
-    res.status(500).json({ message: "Something went wrong. Please try again later." });
-  }
-}
-
-async function createCategory(req, res) {
-  if (req.user.role !== "ADMIN") {
-    return res.status(403).json({ message: "Admin access required." });
-  }
-  const { name, slug, description, sortOrder } = req.body;
-  if (!name) return res.status(400).json({ message: "Category name is required." });
-  if (!slug) return res.status(400).json({ message: "Category slug is required." });
-  try {
-    const category = await threadService.createCategory({
-      name,
-      slug,
-      description,
-      sortOrder: sortOrder !== undefined ? Number(sortOrder) : 0,
-    });
-    res.status(201).json({ category });
-  } catch (error) {
-    if (error.code === "P2002") {
-      return res.status(409).json({ message: "A category with that name or slug already exists." });
-    }
-    console.error("Create category error:", error);
-    res.status(500).json({ message: "Something went wrong. Please try again later." });
-  }
-}
-
-async function updateCategory(req, res) {
-  if (req.user.role !== "ADMIN") {
-    return res.status(403).json({ message: "Admin access required." });
-  }
-  const categoryId = Number(req.params.categoryId);
-  const { name, slug, description, sortOrder } = req.body;
-  try {
-    const existing = await threadService.findCategory(categoryId);
-    if (!existing) return res.status(404).json({ message: "Category not found." });
-    const category = await threadService.updateCategory(categoryId, {
-      name,
-      slug,
-      description,
-      sortOrder: sortOrder !== undefined ? Number(sortOrder) : undefined,
-    });
-    res.status(200).json({ category });
-  } catch (error) {
-    if (error.code === "P2002") {
-      return res.status(409).json({ message: "A category with that name or slug already exists." });
-    }
-    console.error("Update category error:", error);
-    res.status(500).json({ message: "Something went wrong. Please try again later." });
-  }
-}
-
-async function deleteCategory(req, res) {
-  if (req.user.role !== "ADMIN") {
-    return res.status(403).json({ message: "Admin access required." });
-  }
-  const categoryId = Number(req.params.categoryId);
-  try {
-    const existing = await threadService.findCategory(categoryId);
-    if (!existing) return res.status(404).json({ message: "Category not found." });
-    await threadService.deleteCategory(categoryId);
-    res.status(200).json({ message: "Category deleted. Threads have been moved to Uncategorised." });
-  } catch (error) {
-    console.error("Delete category error:", error);
-    res.status(500).json({ message: "Something went wrong. Please try again later." });
-  }
-}
-
 // ─── Threads ──────────────────────────────────────────────────────────────────
 
 async function createThread(req, res) {
-  const { title, context, isPinned, isDeprioritized, categoryId, link } = req.body;
-  if (!title)   return res.status(400).json({ message: "Title is required." });
+  const { title, context, isPinned, isDeprioritized, tag, link } = req.body;
   if (!context) return res.status(400).json({ message: "Context is required." });
+
+  const wordCount = countWords(context);
+  if (wordCount > WORD_LIMIT) {
+    return res.status(400).json({
+      message: `Threads must be ${WORD_LIMIT} words or fewer. Yours is ${wordCount} words.`,
+    });
+  }
+
+  if (tag && !isValidTag(tag)) {
+    return res.status(400).json({ message: "Invalid tag." });
+  }
 
   const isAdmin = req.user.role === "ADMIN";
   const wantsPinned = (isPinned === "true" || isPinned === true) && isAdmin;
@@ -129,12 +86,12 @@ async function createThread(req, res) {
       : [];
 
     const thread = await threadService.createThread({
-      authorId:   req.user.id,
-      categoryId: categoryId ? Number(categoryId) : null,
-      title,
+      authorId: req.user.id,
+      title:    title || null,
       context,
+      tag:      tag || null,
       mediaUrls,
-      link:       link || null,
+      link:     link || null,
       isPinned: wantsPinned,
       isDeprioritized: wantsDeprioritized,
     });
@@ -144,10 +101,11 @@ async function createThread(req, res) {
     // Notify all members about every new thread (fire and forget)
     threadService.getAllUsers().then((users) => {
       const notifLink = `/threads/${thread.id}`;
+      const notifText = title ? `New thread: "${title}"` : `${req.user.username} started a new thread.`;
       users.forEach((u) => {
         if (u.id === req.user.id) return;
-        notifyUser(u, `New thread: "${title}"`, notifLink, "thread_new", "GENERAL", {
-          kind: "new_thread", title,
+        notifyUser(u, notifText, notifLink, "thread_new", "GENERAL", {
+          kind: "new_thread", title: title || null,
         }).catch(() => {});
       });
     }).catch(() => {});
@@ -158,11 +116,12 @@ async function createThread(req, res) {
 }
 
 async function getThreads(req, res) {
-  const page       = parseInt(req.query.page)       || 1;
-  const limit      = parseInt(req.query.limit)      || 20;
-  const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
+  const page  = parseInt(req.query.page)  || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const tag   = req.query.tag || undefined;
+  const sort  = req.query.sort === "active" ? "active" : "latest";
   try {
-    const result = await threadService.getThreads({ page, limit, categoryId });
+    const result = await threadService.getThreads({ page, limit, tag, sort });
     res.status(200).json(result);
   } catch (error) {
     console.error("Get threads error:", error);
@@ -171,11 +130,11 @@ async function getThreads(req, res) {
 }
 
 async function getLatestThreads(req, res) {
-  const page       = parseInt(req.query.page)       || 1;
-  const limit      = parseInt(req.query.limit)      || 20;
-  const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
+  const page  = parseInt(req.query.page)  || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const tag   = req.query.tag || undefined;
   try {
-    const result = await threadService.getLatestThreads({ page, limit, categoryId });
+    const result = await threadService.getLatestThreads({ page, limit, tag });
     res.status(200).json(result);
   } catch (error) {
     console.error("Get latest threads error:", error);
@@ -229,14 +188,28 @@ async function getThread(req, res) {
 }
 
 async function updateThread(req, res) {
-  if (req.user.role !== "ADMIN") {
-    return res.status(403).json({ message: "Admin access required." });
-  }
   const threadId = Number(req.params.threadId);
-  const { title, context, isPinned, isDeprioritized, categoryId, link, existingMediaUrls } = req.body;
+  const { title, context, isPinned, isDeprioritized, tag, link, existingMediaUrls } = req.body;
+  const isAdmin = req.user.role === "ADMIN";
+
+  if (context !== undefined) {
+    const wordCount = countWords(context);
+    if (wordCount > WORD_LIMIT) {
+      return res.status(400).json({
+        message: `Threads must be ${WORD_LIMIT} words or fewer. Yours is ${wordCount} words.`,
+      });
+    }
+  }
+  if (tag !== undefined && tag && !isValidTag(tag)) {
+    return res.status(400).json({ message: "Invalid tag." });
+  }
+
   try {
     const existing = await threadService.findThread(threadId);
     if (!existing) return res.status(404).json({ message: "Thread not found." });
+    if (existing.authorId !== req.user.id && !isAdmin) {
+      return res.status(403).json({ message: "Not authorized." });
+    }
 
     const fileFields = req.files && typeof req.files === "object" && !Array.isArray(req.files)
       ? Object.values(req.files).flat()
@@ -266,14 +239,16 @@ async function updateThread(req, res) {
     }
 
     const thread = await threadService.updateThread(threadId, {
-      title,
+      title:           title   !== undefined ? (title || null) : undefined,
       context,
       mediaUrl,
       mediaUrls,
-      link:            link            !== undefined ? (link || null) : undefined,
-      isPinned:        isPinned        !== undefined ? (isPinned === "true" || isPinned === true) : undefined,
-      isDeprioritized: isDeprioritized !== undefined ? (isDeprioritized === "true" || isDeprioritized === true) : undefined,
-      categoryId:      categoryId      !== undefined ? (categoryId ? Number(categoryId) : null) : undefined,
+      link:            link !== undefined ? (link || null) : undefined,
+      tag:             tag  !== undefined ? (tag || null) : undefined,
+      // Only admins may change pin/deprioritize state, regardless of who
+      // else is allowed to edit the rest of the thread.
+      isPinned:        (isPinned        !== undefined && isAdmin) ? (isPinned === "true" || isPinned === true) : undefined,
+      isDeprioritized: (isDeprioritized !== undefined && isAdmin) ? (isDeprioritized === "true" || isDeprioritized === true) : undefined,
     });
 
     res.status(200).json({ thread });
@@ -352,9 +327,9 @@ async function addComment(req, res) {
   if (!content) return res.status(400).json({ message: "Content is required." });
 
   const wordCount = countWords(content);
-  if (wordCount > COMMENT_WORD_LIMIT) {
+  if (wordCount > WORD_LIMIT) {
     return res.status(400).json({
-      message: `Comments must be ${COMMENT_WORD_LIMIT} words or fewer. Yours is ${wordCount} words.`,
+      message: `Comments must be ${WORD_LIMIT} words or fewer. Yours is ${wordCount} words.`,
     });
   }
 
@@ -463,9 +438,9 @@ async function addReply(req, res) {
   if (!content) return res.status(400).json({ message: "Content is required." });
 
   const wordCount = countWords(content);
-  if (wordCount > COMMENT_WORD_LIMIT) {
+  if (wordCount > WORD_LIMIT) {
     return res.status(400).json({
-      message: `Replies must be ${COMMENT_WORD_LIMIT} words or fewer. Yours is ${wordCount} words.`,
+      message: `Replies must be ${WORD_LIMIT} words or fewer. Yours is ${wordCount} words.`,
     });
   }
 
@@ -583,6 +558,12 @@ async function getDailyThread(req, res) {
   }
 }
 
+// ─── Tags ─────────────────────────────────────────────────────────────────────
+
+async function getTags(req, res) {
+  res.status(200).json({ tags: THREAD_TAGS });
+}
+
 // ─── Member search (for @mention autocomplete) ────────────────────────────────
 
 async function searchMembers(req, res) {
@@ -598,11 +579,8 @@ async function searchMembers(req, res) {
 }
 
 module.exports = {
-  // categories
-  getCategories,
-  createCategory,
-  updateCategory,
-  deleteCategory,
+  // tags
+  getTags,
   // threads
   createThread,
   getThreads,

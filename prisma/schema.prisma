@@ -412,38 +412,13 @@ model BlogLastSeen {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
-// THREAD CATEGORY
-// ─────────────────────────────────────────────────────────────────────────────
-// Admins create and manage categories; any authenticated user can post threads.
-// The seven seed categories are:
-//   new-to-inkwell | general | community-discussion | writing-help
-//   critique-discussions | genre | timezone
-// ─────────────────────────────────────────────────────────────────────────────
-
-model ThreadCategory {
-  id          Int      @id @default(autoincrement())
-  name        String   @unique          // display label, e.g. "New to Inkwell"
-  slug        String   @unique          // url-safe key, e.g. "new-to-inkwell"
-  description String?                   // optional blurb shown in the category header
-  sortOrder   Int      @default(0)      // controls listing order in the UI
-
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  threads     Thread[]
-
-  @@index([sortOrder])
-  @@index([slug])
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // THREAD  — updated model (replace the existing Thread block)
 // ─────────────────────────────────────────────────────────────────────────────
 model Thread {
   id         Int      @id @default(autoincrement())
   authorId   Int                                         // any authenticated member
-  categoryId Int?                                        // null = "uncategorised"
-  title      String
+  tag        String?                                     // fixed tag set enforced in the controller; null = untagged
+  title      String?                                     // optional — a thread can be posted with no title
   context    String                                      // body of the thread
   mediaUrl   String?                                     // first image — kept for back-compat with old cards/notifications
   mediaUrls  Json     @default("[]")                     // full image set, same pattern as ThreadComment/ThreadReply
@@ -455,12 +430,11 @@ model Thread {
   updatedAt  DateTime @updatedAt
 
   author    User              @relation(fields: [authorId],   references: [id], onDelete: Cascade)
-  category  ThreadCategory?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   likes     ThreadLike[]
   comments  ThreadComment[]
 
   @@index([authorId])
-  @@index([categoryId])
+  @@index([tag])
   @@index([createdAt])
   @@index([isPinned])
   @@index([isDeprioritized])

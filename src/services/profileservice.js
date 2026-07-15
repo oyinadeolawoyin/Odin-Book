@@ -101,7 +101,7 @@ async function getPublicProfile(targetUserId) {
       take:    10,
       select:  {
         id: true, title: true, createdAt: true,
-        category: { select: { id: true, name: true } },
+        tag: true,
         _count:   { select: { comments: true, likes: true } },
       },
     }),
@@ -119,7 +119,7 @@ async function getPublicProfile(targetUserId) {
           select: {
             id: true, title: true, createdAt: true,
             author:   { select: { id: true, username: true } },
-            category: { select: { id: true, name: true } },
+            tag: true,
             _count:   { select: { comments: true, likes: true } },
           },
         },

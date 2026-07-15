@@ -16,14 +16,9 @@ router.get("/daily-challenge", threadController.getDailyThread);
 
 router.get("/stats/mine", authenticateJWT, threadController.getMyDiscussionStats);
 
-// ─── Thread Categories ────────────────────────────────────────────────────────
-// Public read — anyone can see the category list and their stats.
-// Admin write — only admins can create, update, or delete categories.
+// ─── Thread tags (public, fixed list) ────────────────────────────────────────
 
-router.get(   "/categories",             threadController.getCategories);
-router.post(  "/categories",             authenticateJWT, threadController.createCategory);
-router.put(   "/categories/:categoryId", authenticateJWT, threadController.updateCategory);
-router.delete("/categories/:categoryId", authenticateJWT, threadController.deleteCategory);
+router.get("/tags", threadController.getTags);
 
 // Shared multi-image upload config — up to five images per post, used for
 // thread posts, comments, and replies alike.
@@ -37,10 +32,11 @@ const MEDIA_FIELDS = [
 
 // ─── Threads ──────────────────────────────────────────────────────────────────
 // Any authenticated member can create a thread.
-// Only admins can update (edit/pin) or delete any thread.
-// Members can delete their own threads (guard is in the controller).
+// Members can edit or delete their own threads (guard is in the controller).
+// Admins can edit or delete any thread, and are the only ones who can pin
+// or deprioritize a thread.
 //
-// Filter by category: GET /threads?categoryId=3
+// Filter by tag: GET /threads?tag=Craft
 
 router.get(   "/pinned-and-today", threadController.getPinnedAndTodayThreads);
 router.get(   "/pinned",           threadController.getPinnedThreads);
