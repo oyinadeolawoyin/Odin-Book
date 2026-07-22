@@ -1,9 +1,11 @@
 const express = require("express");
 require("dotenv").config();
 const app = express();
+const http = require("http");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
 const multer = require("multer");
+const { initSocket } = require("./src/socket");
 // require("./jobs/scheduledjobs");
 const { startChallengeCron } = require("./jobs/challengecron");
 const { startDaysChallengeCron } = require("./jobs/dayschallengeexpirycron");
@@ -18,6 +20,7 @@ const rateLimit = require("express-rate-limit");
 
 const authRoutes        = require("./src/routes/authRoutes");
 const groupSprintRoutes = require("./src/routes/groupSprintRoutes");
+const sprintRoomRoutes  = require("./src/routes/sprintroomroutes");
 const userRoutes        = require("./src/routes/userRoutes");
 const notificationRoutes = require("./src/routes/notificationRoutes");
 const blogRoutes        = require("./src/routes/blogRoutes");
@@ -64,6 +67,7 @@ startAutoEndStaleSprintsCron();
 
 app.use("/api/auth",          authRoutes);
 app.use("/api/sprint",        groupSprintRoutes);
+app.use("/api/sprint-room",   sprintRoomRoutes);
 app.use("/api/users",         userRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/blog",          blogRoutes);
@@ -89,7 +93,10 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: err.message });
 });
 
+const server = http.createServer(app);
+initSocket(server);
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });

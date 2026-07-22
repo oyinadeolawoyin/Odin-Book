@@ -49,10 +49,15 @@ model User {
   sprintReminderOptIn    SprintReminderOptIn?  
   groupSprints        GroupSprint[]
   sprints             Sprint[]
+  sprintRoomMessages  SprintRoomMessage[]
+  sprintRoomPresences SprintRoomPresence[]
+  sprintRoomNotifications SprintRoomNotification[]
   notification        Notification[]
   blogPostLikes       BlogPostLike[]
   blogComments        BlogComment[]
   blogReplies         BlogReply[]
+  blogPostsAuthored   BlogPost[]     @relation("BlogPostAuthor")
+  blogPostsReviewed   BlogPost[]     @relation("BlogPostReviewer")
   soundscapes         Soundscape[]
   writingDrafts       WritingDraft[]
   
@@ -169,7 +174,6 @@ model GroupSprint {
   duration          Int
   totalWordsWritten Int        @default(0)
   liveKitRoomName   String?
-  visibility        Visibility @default(PUBLIC)
   sprintType        SprintType @default(WRITING)
   startedAt         DateTime   @default(now())
   completedAt       DateTime?
@@ -181,7 +185,6 @@ model GroupSprint {
   @@index([userId])
   @@index([isActive])
   @@index([startedAt])
-  @@index([visibility])
 }
 
 model Sprint {
@@ -189,11 +192,12 @@ model Sprint {
   userId        Int
   groupSprintId Int?
   soundscapeId  Int?
-  projectId     Int?
-  checkin       String?
   startWords    Int          @default(0)
+  bankedWords   Int          @default(0) 
+  endWords      Int?                        // raw word count at checkout; wordsWritten/deletedWords are derived from this - startWords
   wordsWritten  Int          @default(0)
   deletedWords  Int          @default(0)
+  leftEarly     Boolean      @default(false) // true if the member left voluntarily (leaveSprint) rather than finishing a normal checkout — client uses this to skip the end-of-sprint ring for them
   startedAt     DateTime     @default(now())
   completedAt   DateTime?
   isActive      Boolean      @default(true)
@@ -206,6 +210,106 @@ model Sprint {
   @@index([groupSprintId])
   @@index([isActive])
   @@index([soundscapeId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPRINT ROOM
+//
+// The single, always-open room — NOT tied 1:1 to a single GroupSprint.
+// Many GroupSprint sessions happen inside this room over its lifetime.
+// Presence here ("who's in the room") is intentionally separate from Sprint
+// ("who's actively sprinting") — a member can be present/tagged during
+// check-in before ever clicking "Join Sprint". There is only ever one room
+// (see sprintRoomService.fetchOrCreateDefaultRoom) — named distinctly from
+// the Threads forum so members don't confuse the two.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model SprintRoom {
+  id        Int      @id @default(autoincrement())
+  name      String   @default("Sprint Room")
+  createdAt DateTime @default(now())
+
+  messages  SprintRoomMessage[]
+  presences SprintRoomPresence[]
+}
+
+// One row per user per room. Updated (not recreated) on join/leave/heartbeat.
+// leftAt null + lastSeenAt recent = "currently in the room" for presence/tagging.
+model SprintRoomPresence {
+  id           Int        @id @default(autoincrement())
+  sprintRoomId Int
+  userId       Int
+  joinedAt     DateTime   @default(now())
+  lastSeenAt   DateTime   @default(now())
+  leftAt       DateTime?
+  status       WriterStatus?
+
+  sprintRoom   SprintRoom @relation(fields: [sprintRoomId], references: [id], onDelete: Cascade)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sprintRoomId, userId])
+  @@index([sprintRoomId])
+  @@index([leftAt])
+}
+
+model SprintRoomMessage {
+  id               Int        @id @default(autoincrement())
+  sprintRoomId     Int
+  senderId         Int?       // nullable — preserved if user deleted, same pattern as ThreadComment
+  content          String     // "" for GIF/SOUND messages — they carry mediaUrl/soundKey instead
+
+  messageType      SprintRoomMessageType @default(TEXT)
+  mediaUrl         String?    // set when messageType = GIF (the Tenor gif url)
+  soundKey         String?    // set when messageType = SOUND (e.g. "clap", "tada", "cheer", "support")
+
+  mentionedUserIds Int[]      @default([])   // parsed @tags — drives notifyUser()
+
+  quotedMessageId  Int?
+  quotedContent    String?
+  quotedSenderName String?
+
+  deletedAt        DateTime?
+  createdAt        DateTime   @default(now())
+
+  sprintRoom       SprintRoom @relation(fields: [sprintRoomId], references: [id], onDelete: Cascade)
+  sender           User?      @relation(fields: [senderId], references: [id], onDelete: SetNull)
+  notifications    SprintRoomNotification[]
+
+  @@index([sprintRoomId])
+  @@index([senderId])
+  @@index([createdAt])
+}
+
+// A lightweight, dedicated notification — NOT written to the main
+// Notification table, so it never shows up on the bell/inbox page.
+// Mirrors the same "own page, own badge" pattern already used for direct
+// messages (DirectConversation.lastReadByA/B) and community updates
+// (BlogLastSeen): fired only for a REPLY (someone quoted your message) or
+// a MENTION (someone @'d you), read in bulk when the chat panel is opened.
+model SprintRoomNotification {
+  id        Int      @id @default(autoincrement())
+  userId    Int      // recipient — the person being mentioned or replied to
+  messageId Int      // the SprintRoomMessage that triggered this
+  kind      SprintRoomNotificationKind
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  message   SprintRoomMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([messageId])
+}
+
+enum SprintRoomNotificationKind {
+  MENTION
+  REPLY
+}
+
+enum SprintRoomMessageType {
+  TEXT
+  GIF
+  SOUND
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -330,10 +434,32 @@ model BlogPost {
 
   isPinned    Boolean  @default(false)
 
+  // ── writer submissions / approval workflow ───────────────────────────────
+  // Posts created directly by an admin are auto-APPROVED. Posts submitted by
+  // regular writers (Writer's Commons submissions) start PENDING and only
+  // appear publicly once an admin approves them. authorId is who wrote/
+  // submitted the piece — kept null for classic admin posts that predate
+  // this feature (they simply render with no byline).
+  status       PostStatus @default(APPROVED)
+  authorId     Int?
+  author       User?      @relation("BlogPostAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  reviewedById Int?
+  reviewer     User?      @relation("BlogPostReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt      DateTime?
+  rejectionReason String?
+
   @@index([createdAt])
   @@index([seriesId])
   @@index([seriesId, seriesOrder])
   @@index([isPinned])
+  @@index([status])
+  @@index([authorId])
+}
+
+enum PostStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1253,14 +1379,15 @@ enum Role {
   FOUNDING_WRITER
 }
 
-enum Visibility {
-  PUBLIC
-  PRIVATE
-}
-
 enum SprintType {
   WRITING
   READING
+}
+
+enum WriterStatus {
+  DRAFTING
+  EDITING
+  OUTLINING
 }
 
 enum DraftStage {

@@ -155,16 +155,23 @@ async function saveSprintReminderOptIn(req, res) {
 }
 
 const prisma = require("../config/prismaClient");
+const sprintRoomService = require("../services/sprintroomservice");
 
 /**
  * GET /notifications/unread-counts
  *
- * Returns unread counts for all three sidebar badges:
+ * Returns unread counts for the sidebar badges:
  *   {
  *     notifications: number,   // Notification rows where read = false
  *     messages: number,        // Conversations with a message newer than lastReadByA/B
  *     communityUpdates: number // BlogPosts newer than the user's lastSeenAt
+ *     sprintRoom: number       // Unread @mentions/replies in the sprint room chat
  *   }
+ *
+ * sprintRoom is meant to be shown on the Sprint Room sidebar icon only while
+ * the writer ISN'T currently in the room (they already see it live on the
+ * Chat toggle in that case) — that display condition belongs in the sidebar
+ * component, this endpoint just reports the raw count.
  *
  * Called by the sidebar on mount and whenever the window regains focus.
  */
@@ -237,10 +244,14 @@ async function getUnreadCounts(req, res) {
         : {}, // never visited → all posts are "new"
     });
 
+    // ── 4. Unread sprint room chat mentions/replies ──────────────────────
+    const sprintRoomCount = await sprintRoomService.fetchUnreadNotificationCount(userId);
+
     res.status(200).json({
       notifications:    notificationCount,
       messages:         messageCount,
       communityUpdates: communityUpdateCount,
+      sprintRoom:       sprintRoomCount,
     });
   } catch (error) {
     console.error("Get unread counts error:", error);

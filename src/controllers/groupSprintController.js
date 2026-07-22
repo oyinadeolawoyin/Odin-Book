@@ -4,7 +4,7 @@ const { AccessToken, TrackSource } = require("livekit-server-sdk");
 
 // ─── GROUP SPRINT ─────────────────────────────────────────────
 async function startGroupSprint(req, res) {
-  const { duration, visibility, sprintType, userId: bodyUserId, username: bodyUsername } = req.body;
+  const { duration, sprintType, userId: bodyUserId, username: bodyUsername } = req.body;
 
   const userId   = req.user ? Number(req.user.id)       : Number(bodyUserId);
   const username = req.user ? req.user.username          : bodyUsername;
@@ -13,15 +13,12 @@ async function startGroupSprint(req, res) {
     return res.status(400).json({ message: "Missing userId or username" });
   }
 
-  const allowedVisibilities = ["PUBLIC", "PRIVATE"];
-  const resolvedVisibility  = allowedVisibilities.includes(visibility) ? visibility : "PUBLIC";
-
   const allowedSprintTypes  = ["WRITING", "READING"];
   const resolvedSprintType  = allowedSprintTypes.includes(sprintType)  ? sprintType  : "WRITING";
 
   try {
     const groupSprint = await groupSprintService.startGroupSprint(
-      userId, Number(duration), resolvedVisibility, resolvedSprintType
+      userId, Number(duration), resolvedSprintType
     );
 
     res.status(201).json({ groupSprint });
@@ -35,9 +32,17 @@ async function endGroupSprint(req, res) {
   const groupSprintId = Number(req.params.groupSprintId);
 
   try {
-    const groupSprint = await groupSprintService.endGroupSprint(groupSprintId);
+    const groupSprint = await groupSprintService.fetchGroupSprint(groupSprintId);
+    if (!groupSprint) {
+      return res.status(404).json({ message: "Group sprint not found" });
+    }
+    if (Number(groupSprint.userId) !== Number(req.user.id)) {
+      return res.status(403).json({ message: "Only the host can end the sprint early." });
+    }
 
-    res.status(200).json({ groupSprint });
+    const ended = await groupSprintService.endGroupSprint(groupSprintId);
+
+    res.status(200).json({ groupSprint: ended });
   } catch (error) {
     console.error("Group sprint end error:", error);
     res.status(500).json({ message: "Something went wrong. Please try again later." });
@@ -95,22 +100,79 @@ async function fetchLastGroupSprint(req, res) {
 // ─── SPRINT ───────────────────────────────────────────────────
 
 async function joinSprint(req, res) {
-  const { groupSprintId, checkin, startWords, soundscapeId } = req.body;
+  const { groupSprintId, startWords, soundscapeId, rebaseline } = req.body;
   const userId = Number(req.user.id);
 
   try {
     const sprint = await groupSprintService.joinSprint(
       userId,
       Number(groupSprintId),
-      checkin,
       startWords    != null ? Number(startWords)    : 0,
       soundscapeId  ? Number(soundscapeId)  : null,
+      { rebaseline: !!rebaseline },
     );
 
     res.status(201).json({ sprint });
   } catch (error) {
     console.error("Join sprint error:", error);
     res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
+// Periodic background sync while a sprint is still running — persists the
+// live word count so an in-progress sprint survives a closed tab, crash, or
+// quick navigation away without waiting for a proper checkout/leave. Does
+// NOT end the sprint (isActive/completedAt untouched). Silently no-ops
+// (rather than erroring) if the sprint was already checked out/left, since
+// a late sync ping arriving after that is expected, not a problem.
+async function updateSprintProgress(req, res) {
+  const sprintId = Number(req.params.sprintId);
+  const { currentWordCount } = req.body;
+
+  if (!sprintId || isNaN(sprintId)) {
+    return res.status(400).json({ message: "Invalid sprint ID." });
+  }
+
+  try {
+    const sprint = await groupSprintService.updateSprintProgress(
+      sprintId,
+      currentWordCount != null ? Number(currentWordCount) : 0
+    );
+
+    res.status(200).json({ sprint });
+  } catch (error) {
+    console.error("Sprint progress sync error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
+// Draft switch mid-sprint — NOT a rejoin. The writer is still in the same
+// sprint the whole time, they just changed which draft they're looking at.
+// Keeps the existing sprint row and re-anchors its startWords baseline so
+// the total already earned carries over exactly, then keeps climbing
+// against the new draft as they keep typing.
+async function rebaselineSprint(req, res) {
+  const sprintId = Number(req.params.sprintId);
+  const { oldWordCount, newWordCount } = req.body;
+
+  if (!sprintId || isNaN(sprintId)) {
+    return res.status(400).json({ message: "Invalid sprint ID." });
+  }
+
+  try {
+    const sprint = await groupSprintService.rebaselineSprint(
+      sprintId,
+      oldWordCount != null ? Number(oldWordCount) : 0,
+      newWordCount != null ? Number(newWordCount) : 0
+    );
+
+    res.status(200).json({ sprint });
+  } catch (error) {
+    console.error("Rebaseline sprint error:", error);
+    const status = error.message === "Sprint not found" ? 404
+      : error.message === "Sprint is no longer active" ? 409
+      : 500;
+    res.status(status).json({ message: error.message || "Something went wrong. Please try again later." });
   }
 }
 
@@ -131,6 +193,27 @@ async function checkoutSprint(req, res) {
     res.status(200).json({ sprint });
   } catch (error) {
     console.error("Checkout sprint error:", error);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
+async function leaveSprint(req, res) {
+  const sprintId = Number(req.params.sprintId);
+  const { currentWordCount } = req.body;
+
+  if (!sprintId || isNaN(sprintId)) {
+    return res.status(400).json({ message: "Invalid sprint ID." });
+  }
+
+  try {
+    const sprint = await groupSprintService.leaveSprint(
+      sprintId,
+      currentWordCount != null ? Number(currentWordCount) : null
+    );
+
+    res.status(200).json({ sprint });
+  } catch (error) {
+    console.error("Leave sprint error:", error);
     res.status(500).json({ message: "Something went wrong. Please try again later." });
   }
 }
@@ -223,6 +306,9 @@ module.exports = {
   fetchLastGroupSprint,
   joinSprint,
   checkoutSprint,
+  leaveSprint,
+  updateSprintProgress,
+  rebaselineSprint,
   fetchLoginUserSprint,
   fetchUserSprintHistory,
   fetchUserSprintHeatmap,

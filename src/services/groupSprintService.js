@@ -61,9 +61,9 @@ async function autoEndStaleSprints() {
 }
 
 // ─── GROUP SPRINT ─────────────────────────────────────────────
-async function startGroupSprint(userId, duration, visibility = "PUBLIC", sprintType = "WRITING") {
+async function startGroupSprint(userId, duration, sprintType = "WRITING") {
   const groupSprint = await prisma.groupSprint.create({
-    data: { userId, duration, visibility, sprintType }
+    data: { userId, duration, sprintType }
   });
 
   return prisma.groupSprint.update({
@@ -118,7 +118,7 @@ async function fetchAllActiveGroupSprints({ take, skip }) {
 
   const [groupSprints, total] = await prisma.$transaction([
     prisma.groupSprint.findMany({
-      where: { isActive: true, visibility: "PUBLIC" }, // only PUBLIC sprints in the global list
+      where: { isActive: true },
       skip,
       take,
       orderBy: { startedAt: "desc" },
@@ -133,7 +133,7 @@ async function fetchAllActiveGroupSprints({ take, skip }) {
         _count: { select: { sprints: true } }
       }
     }),
-    prisma.groupSprint.count({ where: { isActive: true, visibility: "PUBLIC" } })
+    prisma.groupSprint.count({ where: { isActive: true } })
   ]);
 
   return { groupSprints, total };
@@ -161,19 +161,35 @@ async function fetchLastGroupSprint() {
 
 // ─── SPRINT ───────────────────────────────────────────────────
 
-// projectId is now part of join — each member can optionally link their project
-async function joinSprint(userId, groupSprintId, checkin, startWords, soundscapeId, projectId) {
+async function joinSprint(userId, groupSprintId, startWords, soundscapeId, { rebaseline = false } = {}) {
   const existing = await prisma.sprint.findFirst({
     where: { userId, groupSprintId, isActive: true }
   });
 
-  if (existing) return existing;
+  if (existing) {
+    // Plain "join" (e.g. a double-click) should just hand back the same
+    // in-progress row untouched. A rejoin after a mid-sprint draft switch
+    // is different: it's supposed to rebaseline against the new draft's
+    // starting count, even if this exact row was already active — e.g.
+    // because a prior checkout call silently failed server-side. Without
+    // this, the row would keep whichever draft's baseline it started
+    // with, permanently mismatched against the draft you're actually on.
+    if (!rebaseline) return existing;
+    return prisma.sprint.update({
+      where: { id: existing.id },
+      data: { startWords: startWords || 0 },
+      include: {
+        soundscape: {
+          select: { id: true, name: true, fileUrl: true, creatorName: true }
+        }
+      }
+    });
+  }
 
   return prisma.sprint.create({
     data: {
       userId,
       groupSprintId,
-      checkin,
       startWords: startWords || 0,
       soundscapeId: soundscapeId || null,
     },
@@ -188,21 +204,125 @@ async function joinSprint(userId, groupSprintId, checkin, startWords, soundscape
 async function checkoutSprint(sprintId, currentWordCount) {
   const existing = await prisma.sprint.findUnique({
     where: { id: sprintId },
-    select: { startWords: true, userId: true, groupSprintId: true, projectId: true }
+    select: { startWords: true, userId: true, groupSprintId: true, wordsWritten: true }
   });
 
   if (!existing) throw new Error("Sprint not found");
 
   const diff = currentWordCount - existing.startWords;
-  const wordsWritten = diff > 0 ? diff : 0;
+  // True live diff — no high-water mark. If the writer deleted text since
+  // their peak, the persisted total reflects that, same as what they saw
+  // on screen. Floored at 0 so a net-negative diff (deleted below the
+  // starting count) doesn't record a negative word count.
+  const wordsWritten = Math.max(0, diff);
   const deletedWords = diff < 0 ? Math.abs(diff) : 0;
 
   const sprint = await prisma.sprint.update({
     where: { id: sprintId },
-    data: { wordsWritten, deletedWords, completedAt: new Date(), isActive: false }
+    data: { endWords: currentWordCount, wordsWritten, deletedWords, completedAt: new Date(), isActive: false }
   });
 
   // ── Update group sprint total ──────────────────────────────
+  if (existing.groupSprintId) {
+    const allSprints = await prisma.sprint.findMany({
+      where: { groupSprintId: existing.groupSprintId },
+      select: { wordsWritten: true }
+    });
+    const total = allSprints.reduce((sum, s) => sum + (s.wordsWritten || 0), 0);
+    await prisma.groupSprint.update({
+      where: { id: existing.groupSprintId },
+      data: { totalWordsWritten: total }
+    });
+  }
+
+  return sprint;
+}
+
+// Live word-count sync while a sprint is still running — same diff logic as
+// checkoutSprint, but doesn't end the sprint (isActive/completedAt untouched).
+// Called from the socket handler on each progress tick so every writer's
+// bar can update without waiting for a checkout. Returns null (rather than
+// throwing) for a sprint that's already been checked out/left, since a late
+// progress ping arriving after that is expected, not an error.
+async function updateSprintProgress(sprintId, currentWordCount) {
+  const existing = await prisma.sprint.findUnique({
+    where: { id: sprintId },
+    select: { startWords: true, isActive: true }
+  });
+
+  if (!existing) throw new Error("Sprint not found");
+  if (!existing.isActive) return null;
+
+  const diff = currentWordCount - existing.startWords;
+  // True live diff — no high-water mark, same as checkoutSprint. A
+  // background sync mid-sprint should persist exactly what's on screen,
+  // not lock in whatever the peak happened to be at an earlier tick.
+  const wordsWritten = Math.max(0, diff);
+
+  return prisma.sprint.update({
+    where: { id: sprintId },
+    data: { wordsWritten },
+    select: { id: true, userId: true, groupSprintId: true, wordsWritten: true }
+  });
+}
+
+// Called when a writer switches drafts mid-sprint. Keeps the SAME sprint
+// row running (no checkout, no new row) — just shifts its startWords
+// baseline so the diff formula (currentWordCount - startWords), applied
+// against the *new* draft's word count, reproduces the exact total the
+// writer had already earned on the old draft, and keeps climbing from
+// there as they keep typing. This is the same floor-at-zero diff logic as
+// checkoutSprint/updateSprintProgress/leaveSprint — just re-anchored.
+async function rebaselineSprint(sprintId, oldWordCount, newWordCount) {
+  const existing = await prisma.sprint.findUnique({
+    where: { id: sprintId },
+    select: { startWords: true, isActive: true },
+  });
+
+  if (!existing) throw new Error("Sprint not found");
+  if (!existing.isActive) throw new Error("Sprint is no longer active");
+
+  // Total already earned on the draft being left.
+  const totalSoFar = Math.max(0, oldWordCount - existing.startWords);
+  // Re-anchor so newWordCount - newStartWords === totalSoFar right now.
+  const newStartWords = newWordCount - totalSoFar;
+
+  return prisma.sprint.update({
+    where: { id: sprintId },
+    data: { startWords: newStartWords, wordsWritten: totalSoFar },
+  });
+}
+
+// A voluntary early exit — distinct from checkoutSprint, which is the
+// "properly finished, sprint ended naturally" path. currentWordCount is
+// optional here: leaving shouldn't force a final word-count entry, that's
+// the whole point of it being lower-friction than checkout.
+async function leaveSprint(sprintId, currentWordCount) {
+  const existing = await prisma.sprint.findUnique({
+    where: { id: sprintId },
+    select: { startWords: true, groupSprintId: true, wordsWritten: true }
+  });
+
+  if (!existing) throw new Error("Sprint not found");
+
+  // If no final count is given, keep whatever was last persisted (e.g. by
+  // the periodic background sync) rather than wiping it to 0 — leaving is
+  // meant to be lower-friction than checkout, not lossy.
+  let wordsWritten = existing.wordsWritten, deletedWords = 0, endWords = null;
+  if (currentWordCount != null) {
+    const diff = currentWordCount - existing.startWords;
+    // True live diff, same as checkoutSprint/updateSprintProgress — no
+    // high-water mark.
+    wordsWritten = Math.max(0, diff);
+    deletedWords = diff < 0 ? Math.abs(diff) : 0;
+    endWords = currentWordCount;
+  }
+
+  const sprint = await prisma.sprint.update({
+    where: { id: sprintId },
+    data: { endWords, wordsWritten, deletedWords, leftEarly: true, completedAt: new Date(), isActive: false }
+  });
+
   if (existing.groupSprintId) {
     const allSprints = await prisma.sprint.findMany({
       where: { groupSprintId: existing.groupSprintId },
@@ -253,7 +373,6 @@ async function fetchUserSprintHistory(userId, { limit = 20, days } = {}) {
     take: limit,
     select: {
       id: true,
-      checkin: true,
       wordsWritten: true,
       startedAt: true,
       completedAt: true,
@@ -306,6 +425,9 @@ module.exports = {
   fetchLastGroupSprint,
   joinSprint,
   checkoutSprint,
+  leaveSprint,
+  updateSprintProgress,
+  rebaselineSprint,
   fetchLoginUserSprint,
   fetchUserSprintHistory,
   fetchUserSprintHeatmap,
