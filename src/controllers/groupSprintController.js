@@ -4,13 +4,11 @@ const { AccessToken, TrackSource } = require("livekit-server-sdk");
 
 // ─── GROUP SPRINT ─────────────────────────────────────────────
 async function startGroupSprint(req, res) {
-  const { duration, sprintType, userId: bodyUserId, username: bodyUsername } = req.body;
+  const { duration, sprintType } = req.body;
+  const userId = Number(req.user.id);
 
-  const userId   = req.user ? Number(req.user.id)       : Number(bodyUserId);
-  const username = req.user ? req.user.username          : bodyUsername;
-
-  if (!userId || !username) {
-    return res.status(400).json({ message: "Missing userId or username" });
+  if (!userId) {
+    return res.status(400).json({ message: "Missing userId" });
   }
 
   const allowedSprintTypes  = ["WRITING", "READING"];

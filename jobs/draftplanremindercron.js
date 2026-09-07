@@ -36,9 +36,11 @@ function startDraftPlanReminderCron() {
         const message = `Time to write! Your goal today is ${w.dailyGoal} ${unit} on "${w.storyTitle}". You've got this.`;
         const link    = `/draftplan`;
 
-        notifyUser(w.user, message, link, "draftplan_daily_reminder", "GENERAL", {
+        // No single "actor" for a system reminder, so avatar is null —
+        // category "WRITING" is what puts this under the Writing tab.
+        notifyUser(w.user, message, link, "draftplan_daily_reminder", "GENERAL", null, {
           kind: "challenge_reminder", title: w.storyTitle,
-        }).catch(() => {});
+        }, "WRITING").catch(() => {});
       }
     } catch (err) {
       console.error("[draftPlanReminderCron] error:", err.message);

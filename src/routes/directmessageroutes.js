@@ -14,6 +14,12 @@ router.use(authenticateJWT);
 // Use this to render the inbox / conversation list.
 router.get("/", ctrl.listConversations);
 
+// GET /direct-messages/unread-count
+// Powers the Inbox sidebar badge on its own — same dedicated-endpoint
+// pattern as GET /mailbox/unread-count, so this badge doesn't depend on
+// (or break with) the shared /notifications/unread-counts endpoint.
+router.get("/unread-count", ctrl.fetchUnreadCount);
+
 // ─── CONVERSATION ROOM ────────────────────────────────────────────────────────
 
 // POST /direct-messages/conversations/:userId

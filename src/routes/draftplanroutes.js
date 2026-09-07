@@ -6,31 +6,47 @@ const ctrl    = require("../controllers/draftplancontroller");
 const { authenticateJWT } = require("../config/jwt");
 const upload = require("../config/multer");
 
-// ─── COMMUNITY FEEDS ─────────────────────────────────────────────────────────
+// Note: "/weekly-target" moved to GET /api/workspace/weekly-target — see
+// workspaceroutes.js. "Working toward weekly target" is a workspace concept
+// now (it's the base list the draft-plan/workspace split is built from).
+//
+// Multi-plan note: a writer can now hold several draft plans at once, so
+// every plan-scoped route below is nested under /:planId. Ownership of
+// planId is re-checked on every request in the service layer (see
+// resolvePlan in draftplanservice.js) — a stale/foreign planId 404s the
+// same way a missing plan always did.
 
-router.get("/active",       ctrl.getActiveDraftWriters);
-router.get("/logged-today", ctrl.getWritersWhoLoggedToday);
+// ─── PLAN LIST (authenticated) ────────────────────────────────────────────────
+router.get("/mine", authenticateJWT, ctrl.getMyPlans);
 
-// Same-day writing peers — requires auth since it's scoped to writers who
-// share today as a writing day with the requesting user (checked in service).
-// Includes peers who've already logged today (marked hasLoggedToday) as
-// well as those still getting ready.
-router.get("/scheduled-today", authenticateJWT, ctrl.getWritersScheduledToday);
+// ─── PLAN CRUD (authenticated) ─────────────────────────────────────────────────
 
-// ─── PLAN (authenticated) ─────────────────────────────────────────────────────
+router.post("/",              authenticateJWT, ctrl.createPlan);
+router.get("/:planId",        authenticateJWT, ctrl.getMyPlan);
+router.patch("/:planId",      authenticateJWT, ctrl.updatePlan);
+router.delete("/:planId",     authenticateJWT, ctrl.deletePlan);
 
-router.post("/",    authenticateJWT, ctrl.createPlan);
-router.get("/mine", authenticateJWT, ctrl.getMyPlan);
-router.patch("/",   authenticateJWT, ctrl.updatePlan);
-router.delete("/",  authenticateJWT, ctrl.deletePlan);
+// ─── TIMELINE ─────────────────────────────────────────────────────────────────
+router.get("/:planId/timeline",  authenticateJWT, ctrl.getTimeline);
+router.get("/:planId/history",   authenticateJWT, ctrl.getPlanHistory);
+router.patch("/:planId/day-plan", authenticateJWT, ctrl.planDay);
 
 // ─── MOODBOARD IMAGE UPLOAD ───────────────────────────────────────────────────
-// Uses the same multer + fileUploader pattern as thread media uploads.
-// Returns { url } — the frontend appends it to moodboardImages then PATCHes /draftplan.
-router.post("/upload-image", authenticateJWT, upload.single("image"), ctrl.uploadMoodboardImage);
+router.post("/:planId/upload-image", authenticateJWT, upload.single("image"), ctrl.uploadMoodboardImage);
 
 // ─── PROGRESS LOGGING (authenticated) ────────────────────────────────────────
+router.post("/:planId/progress", authenticateJWT, ctrl.logProgress);
 
-router.post("/progress", authenticateJWT, ctrl.logProgress);
+// ─── BONUS QUEST ──────────────────────────────────────────────────────────────
+// Opt-in "mystery chest" for days that AREN'T one of the writer's planned
+// writing days — see DraftBonusQuest in schema.prisma. Kept fully outside
+// /progress and DraftProgressLog on purpose: quest words never touch the
+// story's word count.
+
+router.post("/:planId/bonus-quest",          authenticateJWT, ctrl.openBonusQuest);
+router.post("/:planId/bonus-quest/pick",     authenticateJWT, ctrl.pickBonusQuestPrompt);
+router.post("/:planId/bonus-quest/decline",  authenticateJWT, ctrl.declineBonusQuest);
+router.get("/:planId/bonus-quest/today",     authenticateJWT, ctrl.getTodaysBonusQuest);
+router.post("/:planId/bonus-quest/progress", authenticateJWT, ctrl.logBonusQuestProgress);
 
 module.exports = router;

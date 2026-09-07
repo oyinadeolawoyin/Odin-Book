@@ -1,7 +1,6 @@
 const express = require("express");
 const router = express.Router();
 const authController = require("../controllers/authController");
-const discordController = require("../controllers/discordController");
 const { body } = require("express-validator");
 const { authenticateJWT } = require("../config/jwt");
 const { validationResult } = require("express-validator");
@@ -54,19 +53,4 @@ router.patch("/changePassword", authenticateJWT, authController.changePassword);
 router.post("/forgetPassword", authController.forgetPassword);
 router.post("/resetPassword", authController.resetPassword);
 
-// ─── Discord linking — authenticated site users ───────────────
-router.patch("/discord/link", authenticateJWT, discordController.linkDiscord);
-router.patch("/discord/unlink", authenticateJWT, discordController.unlinkDiscord);
-
-// ─── Discord bot upsert — bot secret only, no JWT ────────────
-router.post("/discord/bot/upsert", requireBotSecret, discordController.botUpsertUser);
-
 module.exports = router;
-
-// ─── Bot secret middleware ────────────────────────────────────
-function requireBotSecret(req, res, next) {
-  if (req.headers["x-bot-secret"] !== process.env.BOT_SECRET) {
-    return res.status(401).json({ message: "Unauthorized" });
-  }
-  next();
-}

@@ -90,6 +90,7 @@ async function sendMessage(req, res) {
         `/messages/${conversationId}`,
         "direct_message",
         "MESSAGE",
+        result.message.senderAvatar,
         { kind: "direct_message", excerpt: result.message.content }
       ).catch(() => {});
     }
@@ -130,11 +131,26 @@ async function markConversationRead(req, res) {
 }
  
 
+/**
+ * GET /direct-messages/unread-count
+ * Powers the Inbox sidebar badge — same shape as mailboxController.fetchUnreadCount.
+ */
+async function fetchUnreadCount(req, res) {
+  try {
+    const count = await dmService.fetchUnreadCount(req.user.id);
+    res.status(200).json({ count });
+  } catch (err) {
+    console.error("Fetch DM unread count error:", err);
+    res.status(500).json({ message: "Something went wrong. Please try again later." });
+  }
+}
+
 module.exports = {
   listConversations,
   getOrCreateConversation,
   getMessages,
   sendMessage,
   deleteMessage,
-  markConversationRead
+  markConversationRead,
+  fetchUnreadCount
 };

@@ -3,8 +3,8 @@ const sprintRoomService = require("../services/sprintroomservice");
 async function fetchRoom(req, res) {
   try {
     const room = await sprintRoomService.fetchOrCreateDefaultRoom();
-    const currentGroupSprint = await sprintRoomService.fetchCurrentGroupSprint();
-    res.status(200).json({ room, currentGroupSprint });
+    const sprintingMembers = await sprintRoomService.fetchSprintingMembers(room.id);
+    res.status(200).json({ room, sprintingMembers });
   } catch (error) {
     console.error("Fetch sprint room error:", error);
     res.status(500).json({ message: "Something went wrong. Please try again later." });
@@ -50,24 +50,6 @@ async function leaveRoom(req, res) {
   }
 }
 
-// Writer sets their own "what I'm doing" flag (DRAFTING / EDITING / OUTLINING),
-// or clears it by sending status: null. Display-only — nothing else in the
-// app reads this.
-async function setStatus(req, res) {
-  const sprintRoomId = Number(req.params.sprintRoomId);
-  const userId = Number(req.user.id);
-  const { status } = req.body;
-
-  try {
-    const presence = await sprintRoomService.setStatus(sprintRoomId, userId, status || null);
-    res.status(200).json({ presence });
-  } catch (error) {
-    console.error("Set sprint room status error:", error);
-    const status_ = error.message === "Unknown status" ? 400 : 500;
-    res.status(status_).json({ message: error.message || "Something went wrong. Please try again later." });
-  }
-}
-
 async function fetchRoomMembers(req, res) {
   const sprintRoomId = Number(req.params.sprintRoomId);
 
@@ -83,25 +65,18 @@ async function fetchRoomMembers(req, res) {
 async function postMessage(req, res) {
   const sprintRoomId = Number(req.params.sprintRoomId);
   const senderId = Number(req.user.id);
-  const { content, quotedMessageId, messageType = "TEXT", mediaUrl, soundKey } = req.body;
+  const { content, quotedMessageId } = req.body;
 
-  if (messageType === "TEXT" && (!content || !content.trim())) {
+  if (!content || !content.trim()) {
     return res.status(400).json({ message: "Message content is required." });
-  }
-  if (messageType === "GIF" && !mediaUrl) {
-    return res.status(400).json({ message: "A GIF message requires a mediaUrl." });
-  }
-  if (messageType === "SOUND" && !sprintRoomService.SOUND_KEYS.has(soundKey)) {
-    return res.status(400).json({ message: "Unknown soundKey." });
   }
 
   try {
     const message = await sprintRoomService.postMessage(
       sprintRoomId,
       senderId,
-      (content || "").trim(),
-      quotedMessageId ? Number(quotedMessageId) : null,
-      { messageType, mediaUrl: mediaUrl || null, soundKey: soundKey || null }
+      content.trim(),
+      quotedMessageId ? Number(quotedMessageId) : null
     );
     res.status(201).json({ message });
   } catch (error) {
@@ -138,19 +113,6 @@ async function deleteMessage(req, res) {
   }
 }
 
-async function searchGifs(req, res) {
-  const q = (req.query.q || "").trim();
-  const pos = req.query.pos || undefined;
-
-  try {
-    const { gifs, next } = await sprintRoomService.searchGifs(q, { limit: 24, pos });
-    res.status(200).json({ gifs, next });
-  } catch (error) {
-    console.error("Sprint room GIF search error:", error);
-    res.status(500).json({ message: "Something went wrong. Please try again later." });
-  }
-}
-
 async function getUnreadNotificationCount(req, res) {
   const userId = Number(req.user.id);
 
@@ -180,12 +142,10 @@ module.exports = {
   joinRoom,
   heartbeat,
   leaveRoom,
-  setStatus,
   fetchRoomMembers,
   postMessage,
   fetchRoomMessages,
   deleteMessage,
-  searchGifs,
   getUnreadNotificationCount,
   markNotificationsRead,
 };

@@ -1,5 +1,8 @@
-const notificationsService   = require("../services/notificationService");
-const sprintReminderService  = require("../services/sprintreminderservice");
+const notificationsService = require("../services/notificationService");
+const prisma = require("../config/prismaClient");
+const sprintRoomService = require("../services/sprintroomservice");
+const { sendEmail } = require("../config/mailer");
+const { sendPushNotification } = notificationsService;
 
 // ============================================
 // NOTIFICATION OPERATIONS
@@ -75,7 +78,7 @@ async function getPreferences(req, res) {
       res.status(500).json({ message: "Failed to fetch preferences" });
     }
 }
-  
+
 /**
  * Save notification preferences for the current user
  * @route POST /notifications/preferences
@@ -85,11 +88,11 @@ async function savePreferences(req, res) {
     try {
       const userId = req.user.id;
       const { preferences } = req.body;
-  
+
       if (!preferences || typeof preferences !== "object") {
         return res.status(400).json({ message: "preferences object is required" });
       }
-  
+
       await notificationsService.savePreferences(userId, preferences);
       res.status(200).json({ message: "Preferences saved successfully" });
     } catch (error) {
@@ -97,65 +100,6 @@ async function savePreferences(req, res) {
       res.status(500).json({ message: "Failed to save preferences" });
     }
 }
-
-// ============================================
-// SPRINT REMINDER OPT-IN
-// ============================================
-
-/**
- * Get whether the current user has opted into the Friday sprint reminder.
- * The AccountabilityPage toggle reads this on mount to set its initial state.
- *
- * Response: { optedIn: boolean }
- *   - true  → reminder is active
- *   - false → reminder is off (or user has never set a preference, defaults false)
- *
- * @route GET /notifications/sprint-reminder
- */
-async function getSprintReminderOptIn(req, res) {
-  try {
-    const record = await sprintReminderService.fetchSprintReminderOptIn(req.user.id);
-    // If no record exists yet, the user hasn't opted in → default false
-    res.status(200).json({ optedIn: record ? record.optedIn : false });
-  } catch (error) {
-    console.error("Get sprint reminder opt-in error:", error);
-    res.status(500).json({ message: "Failed to fetch sprint reminder preference" });
-  }
-}
-
-/**
- * Save (toggle) the Friday sprint reminder opt-in for the current user.
- * Called when the writer checks or unchecks the toggle on AccountabilityPage.
- *
- * Body: { optedIn: boolean }
- *
- * @route POST /notifications/sprint-reminder
- */
-async function saveSprintReminderOptIn(req, res) {
-  try {
-    const { optedIn } = req.body;
-
-    if (typeof optedIn !== "boolean") {
-      return res.status(400).json({ message: "optedIn (boolean) is required" });
-    }
-
-    await sprintReminderService.saveSprintReminderOptIn(req.user.id, optedIn);
-
-    // Also keep the existing NotificationPreference JSON blob in sync so that
-    // notifyUser() respects the user's per-channel choices when it fires.
-    await notificationsService.savePreferences(req.user.id, {
-      friday_sprint_reminder: { inbox: optedIn, push: optedIn, email: optedIn },
-    });
-
-    res.status(200).json({ message: "Sprint reminder preference saved" });
-  } catch (error) {
-    console.error("Save sprint reminder opt-in error:", error);
-    res.status(500).json({ message: "Failed to save sprint reminder preference" });
-  }
-}
-
-const prisma = require("../config/prismaClient");
-const sprintRoomService = require("../services/sprintroomservice");
 
 /**
  * GET /notifications/unread-counts
@@ -180,14 +124,14 @@ async function getUnreadCounts(req, res) {
     const userId = Number(req.user.id);
 
     // ── 1. Unread notifications ───────────────────────────────────────────
-    // Excludes MESSAGE / COMMUNITY_UPDATE so this badge count always matches
-    // what the bell page (fetchNotifications) actually displays — those two
-    // types have their own dedicated pages + badges below.
+    // Excludes MESSAGE / COMMUNITY_UPDATE / MAILBOX_CARD so this badge count
+    // always matches what the bell page (fetchNotifications) actually
+    // displays — those types have their own dedicated pages + badges below.
     const notificationCount = await prisma.notification.count({
       where: {
         userId,
         read: false,
-        type: { notIn: ["MESSAGE", "COMMUNITY_UPDATE"] },
+        type: { notIn: ["MESSAGE", "COMMUNITY_UPDATE", "MAILBOX_CARD"] },
       },
     });
 
@@ -260,6 +204,128 @@ async function getUnreadCounts(req, res) {
 }
 
 // ============================================
+// BIRTHDAY NOTICES (cron-driven)
+// ============================================
+// Kept here rather than in notificationService/userService on purpose —
+// this controller decides *when/who* to notify for the birthday event.
+// Both sends below are plain broadcasts/emails, not preference-aware
+// per-user notices, so they talk to prisma/mailer directly instead of
+// going through notifyUser() — same reasoning as authController's
+// new-member notice.
+
+/**
+ * Every user whose dateOfBirth is today (month + day, year ignored).
+ * Uses a raw query since there's no portable "month/day equals" comparison
+ * through Prisma's query builder for a DateTime column.
+ */
+async function findTodaysBirthdays() {
+  const now   = new Date();
+  const month = now.getUTCMonth() + 1;
+  const day   = now.getUTCDate();
+
+  return prisma.$queryRaw`
+    SELECT "id", "username", "avatar"
+    FROM "User"
+    WHERE "isDeleted" = false
+      AND "dateOfBirth" IS NOT NULL
+      AND EXTRACT(MONTH FROM "dateOfBirth") = ${month}
+      AND EXTRACT(DAY FROM "dateOfBirth") = ${day}
+  `;
+}
+
+/**
+ * In-app-only "it's so-and-so's birthday" notice to every other user,
+ * filed under the Community tab. No push/email — this is a broadcast to
+ * the whole site, not a targeted "someone did something to you" notice.
+ */
+async function broadcastBirthdayNotification(birthdayUser) {
+  const recipients = await prisma.user.findMany({
+    where:  { isDeleted: false, id: { not: birthdayUser.id } },
+    select: { id: true, username: true },
+  });
+
+  if (recipients.length === 0) return;
+
+  const message = `It's ${birthdayUser.username}'s birthday today! 🎂 Send them a Birthday card to celebrate.`;
+  const link    = `/${birthdayUser.id}/user`;
+
+  await prisma.notification.createMany({
+    data: recipients.map((r) => ({
+      username:    r.username,
+      userId:      r.id,
+      message,
+      link,
+      type:        "GENERAL",
+      category:    "COMMUNITY",
+      actorAvatar: birthdayUser.avatar ?? null,
+      actorId:     birthdayUser.id, // opens the birthday writer's profile popup on click, same as the new-member notice
+    })),
+  });
+
+  // Web push — same recipients as the in-app broadcast above. No email here
+  // (the birthday user's followers get their own email separately, below).
+  const subscriptions = await prisma.subscription.findMany({
+    where: { userId: { in: recipients.map((r) => r.id) } },
+  });
+  const payload = { title: "New Notification", body: message, url: link, icon: birthdayUser.avatar || undefined };
+  subscriptions.forEach((sub) => sendPushNotification(sub.subscription, payload));
+}
+
+/**
+ * Email-only nudge to the birthday writer's own followers, pointing them
+ * toward sending a BIRTHDAY mailbox card. Deliberately email-only (no
+ * inbox row) — the in-app heads-up already went out to everyone above;
+ * this is the extra "you specifically follow them" push.
+ */
+async function emailFollowersAboutBirthday(birthdayUser) {
+  const follows = await prisma.follow.findMany({
+    where:  { followingId: birthdayUser.id },
+    select: { follower: { select: { id: true, username: true, email: true } } },
+  });
+
+  const followers = follows.map((f) => f.follower).filter((f) => f.email);
+  if (followers.length === 0) return;
+
+  const baseUrl     = process.env.ALLOWED_ORIGIN; // e.g. https://quillweave.com
+  const profileLink = `${baseUrl}/${birthdayUser.id}/user`;
+
+  await Promise.all(
+    followers.map((follower) =>
+      sendEmail(
+        follower.email,
+        `It's ${birthdayUser.username}'s birthday today! 🎂`,
+        `<p>Hello ${follower.username},</p>
+         <p>Today is <strong>${birthdayUser.username}</strong>'s birthday! Since you follow them on Quillweave, we thought you'd want to know.</p>
+         <p>Head over to their profile and send them a birthday wishes card to help make their day.</p>
+         <a href="${profileLink}">Visit ${birthdayUser.username}'s profile</a>`
+      ).catch((err) => console.error(`Birthday email failed for ${follower.email}:`, err))
+    )
+  );
+}
+
+/**
+ * Entry point for the daily birthday cron (see cron/birthdayCron.js).
+ * For every writer whose birthday is today: broadcasts the in-app notice
+ * to everyone, and emails that writer's own followers separately.
+ */
+async function checkBirthdaysAndNotify() {
+  try {
+    const birthdayUsers = await findTodaysBirthdays();
+
+    for (const birthdayUser of birthdayUsers) {
+      await broadcastBirthdayNotification(birthdayUser).catch((err) =>
+        console.error(`Birthday broadcast failed for user ${birthdayUser.id}:`, err)
+      );
+      await emailFollowersAboutBirthday(birthdayUser).catch((err) =>
+        console.error(`Birthday follower emails failed for user ${birthdayUser.id}:`, err)
+      );
+    }
+  } catch (error) {
+    console.error("Birthday cron error:", error);
+  }
+}
+
+// ============================================
 // EXPORTS
 // ============================================
 
@@ -269,7 +335,6 @@ module.exports = {
     markRead,
     savePreferences,
     getPreferences,
-    getSprintReminderOptIn,
-    saveSprintReminderOptIn,
-    getUnreadCounts
+    getUnreadCounts,
+    checkBirthdaysAndNotify,
 };

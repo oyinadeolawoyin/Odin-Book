@@ -40,6 +40,19 @@ function formatMessage(msg) {
   };
 }
 
+// Is this conversation unread for this user? Single source of truth for the
+// check — used by listConversations (per-row dot) and fetchUnreadCount
+// (sidebar badge), so the two can never drift out of sync with each other.
+function isUnreadForUser(conversation, userId) {
+  const last = conversation.messages[0];
+  if (!last || last.senderId === userId) return false;
+
+  const isUserA    = conversation.userAId === userId;
+  const myLastRead = isUserA ? conversation.lastReadByA : conversation.lastReadByB;
+
+  return !myLastRead || last.createdAt > myLastRead;
+}
+
 // ─── CONVERSATIONS ────────────────────────────────────────────────────────────
 
 // Get or create the conversation room between two users.
@@ -116,9 +129,11 @@ async function listConversations(userId) {
   return conversations.map((c) => {
     const other = c.userAId === userId ? c.userB : c.userA;
     const last  = c.messages[0] ?? null;
+
     return {
       id:        c.id,
       otherUser: other,
+      unread:    isUnreadForUser(c, userId),
       lastMessage: last
         ? {
             content:   last.deletedAt ? null : last.content,
@@ -286,11 +301,37 @@ async function markConversationRead(userId, conversationId) {
 }
 
 
+// Powers the Inbox sidebar badge — same idea as mailboxService.fetchUnreadCount:
+// its own small dedicated query, so the badge never depends on the shared
+// /notifications/unread-counts endpoint (or breaks if that route ever does).
+async function fetchUnreadCount(userId) {
+  const conversations = await prisma.directConversation.findMany({
+    where: {
+      OR: [{ userAId: userId }, { userBId: userId }],
+    },
+    select: {
+      userAId:     true,
+      userBId:     true,
+      lastReadByA: true,
+      lastReadByB: true,
+      messages: {
+        where:   { deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        take:    1,
+        select:  { senderId: true, createdAt: true },
+      },
+    },
+  });
+
+  return conversations.filter((c) => isUnreadForUser(c, userId)).length;
+}
+
 module.exports = {
   getOrCreateConversation,
   listConversations,
   getMessages,
   sendMessage,
   deleteMessage,
-  markConversationRead
+  markConversationRead,
+  fetchUnreadCount
 };

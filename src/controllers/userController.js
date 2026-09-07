@@ -165,7 +165,8 @@ async function deleteUser(req, res) {
 
 async function fetchFoundingWriters(req, res) {
   try {
-    const users = await userService.fetchFoundingWriters();
+    const viewerId = req.user?.id ? Number(req.user.id) : undefined;
+    const users = await userService.fetchFoundingWriters(viewerId);
     res.status(200).json({ users });
   } catch (error) {
     console.error("Fetch founding writers error:", error);

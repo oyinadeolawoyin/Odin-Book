@@ -6,10 +6,6 @@ const prisma = require("../config/prismaClient");
 // list without requiring an explicit leave call.
 const PRESENCE_STALE_MS = 60 * 1000; // 60s — pair with a ~20-30s client heartbeat
 
-// Self-reported "what I'm doing" flag — purely informational, shown on a
-// writer's member card so the room can see who's drafting/editing/outlining.
-const WRITER_STATUSES = new Set(["DRAFTING", "EDITING", "OUTLINING"]);
-
 // ─── ROOM LOOKUP ───────────────────────────────────────────────
 
 // Single default room for now — mirrors the "just one room" design.
@@ -21,44 +17,49 @@ async function fetchOrCreateDefaultRoom() {
   return prisma.sprintRoom.create({ data: { name: "Sprint Room" } });
 }
 
-// The GroupSprint currently running (if any) — used to show the countdown
-// timer to EVERYONE in the room, including people who haven't clicked
-// "Join Sprint" yet. Room membership and sprint participation are separate
-// on purpose, but the timer itself should be visible to the whole room.
+async function fetchRoomById(sprintRoomId) {
+  return prisma.sprintRoom.findUnique({ where: { id: Number(sprintRoomId) } });
+}
+
+// ─── SPRINTING MEMBERS (no GroupSprint attachment) ──────────────
 //
-// Also includes each participant's individual Sprint row (user + soundscape)
-// so the room grid/strip can show who's currently sprinting and what
-// they're listening to — without this, the frontend has no way to know who
-// joined, since presence (who's in the room) and sprint participation are
-// tracked separately.
-async function fetchCurrentGroupSprint() {
-  return prisma.groupSprint.findFirst({
-    where: { isActive: true },
-    orderBy: { startedAt: "desc" },
+// The room no longer tracks one shared GroupSprint timer — each writer
+// starts and checks in their own Sprint independently. This is how the
+// room grid/strip knows who's currently sprinting and what they're
+// listening to: take everyone whose presence is still live, then pull
+// each of their individually active Sprint rows. No group entity in
+// between at all.
+async function fetchSprintingMembers(sprintRoomId) {
+  const staleBefore = new Date(Date.now() - PRESENCE_STALE_MS);
+
+  const presentMembers = await prisma.sprintRoomPresence.findMany({
+    where: {
+      sprintRoomId,
+      leftAt: null,
+      lastSeenAt: { gte: staleBefore },
+    },
+    select: { userId: true },
+  });
+
+  const presentUserIds = presentMembers.map((p) => p.userId);
+  if (presentUserIds.length === 0) return [];
+
+  return prisma.sprint.findMany({
+    where: {
+      userId: { in: presentUserIds },
+      isActive: true,
+      groupSprintId: null,
+    },
+    orderBy: { startedAt: "asc" },
     select: {
       id: true,
-      startedAt: true,
-      duration: true,
-      sprintType: true,
       userId: true,
-      sprints: {
-        // No isActive filter here on purpose: a member's row used to
-        // disappear from this list — and therefore from the total —
-        // the instant their sprint ended (checkout, leave, or a draft
-        // switch triggering a checkout+rejoin). The frontend already
-        // picks the right row per user (active one, falling back to
-        // their most recent) via the isActive field below, so it's safe
-        // to hand over every row for this group sprint instead of only
-        // the currently-active ones.
-        select: {
-          id: true,
-          userId: true,
-          isActive: true,
-          wordsWritten: true,
-          user: { select: { id: true, username: true, avatar: true } },
-          soundscape: { select: { id: true, name: true } },
-        },
-      },
+      duration: true,
+      startWords: true,
+      currentWords: true, // initial value on page load — live socket pushes (sprint:progress) take over from here client-side
+      startedAt: true,
+      user: { select: { id: true, username: true, avatar: true } },
+      soundscape: { select: { id: true, name: true } },
     },
   });
 }
@@ -68,9 +69,6 @@ async function fetchCurrentGroupSprint() {
 async function joinRoom(sprintRoomId, userId) {
   return prisma.sprintRoomPresence.upsert({
     where: { sprintRoomId_userId: { sprintRoomId, userId } },
-    // status starts neutral (null) on a fresh join; a returning writer who
-    // never explicitly left (leftAt still null from a stale session) keeps
-    // whatever status they last set rather than being reset under them.
     create: { sprintRoomId, userId },
     update: { leftAt: null, lastSeenAt: new Date() },
   });
@@ -87,23 +85,7 @@ async function heartbeat(sprintRoomId, userId) {
 async function leaveRoom(sprintRoomId, userId) {
   return prisma.sprintRoomPresence.updateMany({
     where: { sprintRoomId, userId, leftAt: null },
-    data: { leftAt: new Date(), status: null },
-  });
-}
-
-// Writer picks their own status from the fixed set — purely a display flag,
-// nothing else in the app reads or enforces it. Pass null to clear it.
-async function setStatus(sprintRoomId, userId, status) {
-  if (status != null && !WRITER_STATUSES.has(status)) {
-    throw new Error("Unknown status");
-  }
-  const updated = await prisma.sprintRoomPresence.updateMany({
-    where: { sprintRoomId, userId, leftAt: null },
-    data: { status: status || null },
-  });
-  if (updated.count === 0) throw new Error("You're not currently in this room");
-  return prisma.sprintRoomPresence.findUnique({
-    where: { sprintRoomId_userId: { sprintRoomId, userId } },
+    data: { leftAt: new Date() },
   });
 }
 
@@ -126,7 +108,7 @@ async function fetchRoomMembers(sprintRoomId) {
   });
 }
 
-// ─── MESSAGES ──────────────────────────────────────────────────
+// ─── MESSAGES (text only — no GIF or SOUND) ─────────────────────
 
 // Pulls @username tokens out of message content and resolves them against
 // any real user (same as thread mentions), not just people currently
@@ -150,22 +132,7 @@ async function resolveMentions(content) {
   return [...matched.values()];
 }
 
-// Fixed set of soundboard sounds the room supports — keeping this as an
-// allowlist (rather than trusting whatever string the client sends) means a
-// SOUND message's key always maps to a real, known sound file, and nobody
-// can smuggle arbitrary content through the soundKey field.
-const SOUND_KEYS = new Set(["clap", "tada", "cheer", "support"]);
-
-async function postMessage(sprintRoomId, senderId, content, quotedMessageId, options = {}) {
-  const { messageType = "TEXT", mediaUrl = null, soundKey = null } = options;
-
-  if (messageType === "GIF" && !mediaUrl) {
-    throw new Error("A GIF message requires a mediaUrl");
-  }
-  if (messageType === "SOUND" && !SOUND_KEYS.has(soundKey)) {
-    throw new Error("Unknown soundKey");
-  }
-
+async function postMessage(sprintRoomId, senderId, content, quotedMessageId) {
   let quotedContent = null;
   let quotedSenderName = null;
 
@@ -180,18 +147,13 @@ async function postMessage(sprintRoomId, senderId, content, quotedMessageId, opt
     }
   }
 
-  // Mentions only make sense for real typed text — a GIF or a soundboard
-  // clap never carries an @handle worth resolving.
-  const mentionedUsers = messageType === "TEXT" ? await resolveMentions(content) : [];
+  const mentionedUsers = await resolveMentions(content);
 
   const message = await prisma.sprintRoomMessage.create({
     data: {
       sprintRoomId,
       senderId,
       content,
-      messageType,
-      mediaUrl,
-      soundKey,
       mentionedUserIds: mentionedUsers.map((u) => u.id),
       quotedMessageId: quotedMessageId || null,
       quotedContent,
@@ -282,67 +244,17 @@ async function markNotificationsRead(userId) {
   });
 }
 
-// ─── GIFS (Tenor) ──────────────────────────────────────────────
-
-// Proxied server-side so the Tenor key never ships to the browser. Set
-// TENOR_API_KEY in the environment. An empty query returns Tenor's
-// "featured" (trending) feed, matching the picker's default view.
-const TENOR_API_KEY = process.env.TENOR_API_KEY;
-const TENOR_CLIENT_KEY = "quillweave";
-
-async function searchGifs(query, { limit = 24, pos } = {}) {
-  if (!TENOR_API_KEY) throw new Error("Tenor is not configured");
-
-  const trimmed = (query || "").trim();
-  const endpoint = trimmed
-    ? "https://tenor.googleapis.com/v2/search"
-    : "https://tenor.googleapis.com/v2/featured";
-
-  const url = new URL(endpoint);
-  url.searchParams.set("key", TENOR_API_KEY);
-  url.searchParams.set("client_key", TENOR_CLIENT_KEY);
-  url.searchParams.set("limit", String(Math.min(limit, 50)));
-  url.searchParams.set("media_filter", "gif");
-  url.searchParams.set("contentfilter", "medium");
-  if (trimmed) url.searchParams.set("q", trimmed);
-  if (pos) url.searchParams.set("pos", String(pos));
-
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("Tenor request failed");
-  const data = await res.json();
-
-  const gifs = (data.results || [])
-    .map((item) => {
-      const gif = item.media_formats?.gif;
-      const tinyGif = item.media_formats?.tinygif || gif;
-      return {
-        id: item.id,
-        title: item.content_description || "",
-        url: gif?.url,
-        previewUrl: tinyGif?.url,
-        width: gif?.dims?.[0],
-        height: gif?.dims?.[1],
-      };
-    })
-    .filter((g) => g.url);
-
-  return { gifs, next: data.next || null };
-}
-
 module.exports = {
   fetchOrCreateDefaultRoom,
-  fetchCurrentGroupSprint,
+  fetchRoomById,
+  fetchSprintingMembers,
   joinRoom,
   heartbeat,
   leaveRoom,
-  setStatus,
   fetchRoomMembers,
   postMessage,
   fetchRoomMessages,
   deleteMessage,
-  searchGifs,
   fetchUnreadNotificationCount,
   markNotificationsRead,
-  SOUND_KEYS,
-  WRITER_STATUSES,
 };

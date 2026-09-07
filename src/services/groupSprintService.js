@@ -100,7 +100,7 @@ async function fetchGroupSprint(groupSprintId) {
     include: {
       sprints: {
         include: {
-          user: { select: { id: true, username: true, avatar: true, discordId: true } },
+          user: { select: { id: true, username: true, avatar: true } },
           soundscape: {
             select: { id: true, name: true, fileUrl: true, creatorName: true }
           }

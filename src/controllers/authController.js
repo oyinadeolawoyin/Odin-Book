@@ -4,9 +4,12 @@ const jwt         = require("../config/jwt");
 const authService = require("../services/authService");
 const userService = require("../services/userService");
 const { initWallet } = require("../services/pointService"); 
+const draftFolderService = require("../services/draftfolderservice");
 const { validationResult } = require("express-validator");
 const crypto      = require("crypto");
 const { sendEmail } = require("../config/mailer");
+const prisma       = require("../config/prismaClient");
+const { sendPushNotification } = require("../services/notificationService");
 
 // ============================================
 // CONFIGURATION
@@ -20,6 +23,104 @@ const cookieOptions = {
   sameSite: isProduction ? "none" : "lax",
   maxAge:   1000 * 60 * 60 * 24 * 21,
 };
+
+// ============================================
+// SIGNUP COMMUNITY NOTICES
+// ============================================
+// These two live here (not authService/userService/notificationService) on
+// purpose — they're triggered by *this* specific action (a new signup),
+// same "the controller that owns the action decides what/who to notify"
+// pattern draftPlanController already uses for its follower fan-outs.
+
+let cachedSystemSenderId = null;
+
+/**
+ * Resolve the "Quillweave Team" account that system-sent mailbox cards
+ * (welcome cards, etc.) come from. Prefers SYSTEM_USER_ID from env; falls
+ * back to the oldest ADMIN account. Cached in memory after the first lookup.
+ */
+async function getSystemSenderId() {
+  if (cachedSystemSenderId) return cachedSystemSenderId;
+
+  if (process.env.SYSTEM_USER_ID) {
+    cachedSystemSenderId = Number(process.env.SYSTEM_USER_ID);
+    return cachedSystemSenderId;
+  }
+
+  const admin = await prisma.user.findFirst({
+    where:   { role: "ADMIN", isDeleted: false },
+    orderBy: { id: "asc" },
+    select:  { id: true },
+  });
+
+  if (!admin) return null;
+  cachedSystemSenderId = admin.id;
+  return cachedSystemSenderId;
+}
+
+/**
+ * In-app-only notice to every existing user that a new writer joined.
+ * Deliberately bypasses notifyUser()/push/email — this is a broadcast to
+ * the whole community, not a targeted "someone did something to you"
+ * notice, so it only ever needs the inbox row under the Community tab.
+ *
+ * actorId is set to the new writer's id so clicking the notification opens
+ * their profile popup (see notification.jsx) instead of just navigating —
+ * the popup's own "Send a card" button is what actually gets the Welcome
+ * card sent, so this notice's job is just to point people at it.
+ */
+async function broadcastNewMemberNotification(newUser) {
+  const recipients = await prisma.user.findMany({
+    where:  { isDeleted: false, id: { not: newUser.id } },
+    select: { id: true, username: true },
+  });
+
+  if (recipients.length === 0) return;
+
+  const message = `${newUser.username} just joined Quillweave! Send them a Welcome card to say hi. 👋`;
+  const link    = `/${newUser.id}/user`;
+
+  await prisma.notification.createMany({
+    data: recipients.map((r) => ({
+      username:    r.username,
+      userId:      r.id,
+      message,
+      link,
+      type:        "GENERAL",
+      category:    "COMMUNITY",
+      actorAvatar: newUser.avatar ?? null,
+      actorId:     newUser.id,
+    })),
+  });
+
+  // Web push — same recipients as the in-app broadcast above. No email here.
+  const subscriptions = await prisma.subscription.findMany({
+    where: { userId: { in: recipients.map((r) => r.id) } },
+  });
+  const payload = { title: "New Notification", body: message, url: link, icon: newUser.avatar || undefined };
+  subscriptions.forEach((sub) => sendPushNotification(sub.subscription, payload));
+}
+
+/**
+ * Sends the new writer a WELCOME mailbox card from the Quillweave Team
+ * account, waiting for them the moment they check their mailbox.
+ */
+async function sendWelcomeMailboxCard(newUser) {
+  const senderId = await getSystemSenderId();
+  if (!senderId) {
+    console.error("Welcome card skipped — no SYSTEM_USER_ID/ADMIN account configured.");
+    return;
+  }
+
+  await prisma.mailboxCard.create({
+    data: {
+      senderId,
+      recipientId: newUser.id,
+      type:        "WELCOME",
+      note:        `Welcome to Quillweave, ${newUser.username}! We're so glad you're here — can't wait to see what you write. 🎉`,
+    },
+  });
+}
 
 // ============================================
 // AUTHENTICATION OPERATIONS
@@ -69,6 +170,20 @@ console.log("proTy", projectType, "bigest", biggestBlock, "timepro", timeOnProje
     // ── Seed the feedback hub wallet for every new user ─────────────────────
     // Gives them 5 pts — enough to browse but not enough to post yet.
     await initWallet(user.id);
+
+    // ── Every writer gets one "General" draft folder, created once here ────
+    // Not user-creatable — this is the catch-all for drafts that aren't
+    // tied to a draft plan. They can rename it later, but never delete it.
+    await draftFolderService.createDefaultGeneralFolder(user.id);
+
+    // ── Community notices ────────────────────────────────────────────────
+    // Fire-and-forget: never let one of these fail the signup response.
+    broadcastNewMemberNotification(user).catch((err) =>
+      console.error("New member broadcast error:", err)
+    );
+    sendWelcomeMailboxCard(user).catch((err) =>
+      console.error("Welcome card error:", err)
+    );
 
     const token = jwt.generateToken(user);
     res.cookie("token", token, cookieOptions).status(201).json({

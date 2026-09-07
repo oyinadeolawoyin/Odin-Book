@@ -13,21 +13,6 @@ router.get("/sprint-picker",        authenticateJWT, ctrl.getDraftsForSprintPick
 // Auto-save when sprint ends with Inkwell editor content
 router.post("/sprint-save",         authenticateJWT, ctrl.sprintAutoSave);
 
-// ─── STAGED FOR FEEDBACK (written, but not enough points to post yet) ───────
-
-// The writer's current chapter waiting on points, if any — powers the
-// "unlock your post" nudge on the homepage and drafts page.
-router.get("/staged",               authenticateJWT, ctrl.getStagedDraft);
-
-// Save (or update) a fresh chapter as "staged for feedback" from the
-// submission form, when the writer doesn't yet have enough posting points.
-router.post("/stage-for-feedback",  authenticateJWT, ctrl.stageDraftForFeedback);
-
-// ─── UNPUBLISH (submission → draft) ──────────────────────────────────────────
-
-// Move a live critique submission to drafts
-router.post("/unpublish/:submissionId", authenticateJWT, ctrl.unpublishSubmission);
-
 // ─── DRAFT CRUD ───────────────────────────────────────────────────────────────
 
 router.get("/",                     authenticateJWT, ctrl.getUserDrafts);
@@ -37,17 +22,8 @@ router.get("/:draftId",             authenticateJWT, ctrl.getDraftById);
 router.patch("/:draftId",           authenticateJWT, ctrl.updateDraft);
 router.delete("/:draftId",          authenticateJWT, ctrl.deleteDraft);
 
-// ─── DRAFT ACTIONS ────────────────────────────────────────────────────────────
-
-// Republish a previously-unpublished submission back to the critique hub
-router.post("/:draftId/republish",  authenticateJWT, ctrl.republishDraft);
-
-// Post a fresh draft as a new critique hub submission
-router.post("/:draftId/post-to-hub", authenticateJWT, ctrl.postDraftToHub);
-
 // ─── STICKY NOTES (writer-private "what to fix/add" notes) ──────────────────
-// Only ever exist on WritingDraft rows — cascade-deleted the moment a draft
-// becomes a live submission, so they never show up in the feedback stage.
+// Only ever exist on WritingDraft rows — cascade-deleted along with the draft.
 
 router.get("/:draftId/sticky-notes",           authenticateJWT, ctrl.getStickyNotes);
 router.post("/:draftId/sticky-notes",          authenticateJWT, ctrl.createStickyNote);

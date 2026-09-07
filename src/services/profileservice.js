@@ -1,195 +1,234 @@
 // src/services/profileService.js
 //
-// Aggregates all public profile data in a single Prisma query fan-out.
-// Used by GET /api/profile/:userId
+// Public profile bundle + the follow/like graph between writers.
 //
-// What's returned:
-//   - user (public fields: id, username, bio, avatar, role, createdAt, socialLinks)
-//   - submissionCount + submissions (up to 10 latest, public)
-//   - critiquesGiven count + recent critique items (public)
-//   - reputationTier (public — Bronze / Silver / Gold / Platinum / Diamond)
-//   - threads posted (up to 10 latest, public)
-//   - threadsCommentedOn (up to 10 latest distinct threads the user commented in)
-//   - threadCommentCount (public)
-//   - draftPlan (story title, premise, characters — visible to all)
-//   - daysChallenge (active only — title, duration, startDate, status, focuses)
-//   - sprintCount (total Sprint rows for this user — covers solo-started AND
-//     group-joined sprints, since joining a group sprint also creates a
-//     Sprint row for the joiner)
-//   - draftCount (total WritingDraft rows for this user)
+// GET /api/profile/:userId returns:
+//   - user (public fields: id, username, bio, avatar, role, createdAt,
+//     socialLinks, country, genre, funFact, favoriteSprintTime,
+//     favoriteSprintDays)
+//   - followerCount / followingCount / isFollowing (isFollowing only means
+//     anything when a viewerId is passed in — i.e. someone is logged in)
+//   - likeCount / isLiked (same deal — needs a viewerId)
+//   - currentStreak / longestStreak, via writingActivityService.getStreaks()
+//     — timezone-aware, same helper the rest of the app uses
+//   - cardsSentCount (Mailbox cards this writer has sent)
+//   - draftPlans (every current plan, with a title + % complete)
 //
-// Owner-only fields are fetched separately via their own authenticated routes
-// (posting balance, blocked users, full plan details).
+// Everything else that used to live here (submissions, critiques, threads,
+// reputation, days challenge, sprint/draft totals) has been stripped out for
+// now — bring any of it back the same way if it's needed again later.
 
 const prisma = require("../config/prismaClient");
+const writingActivityService = require("./writingactivityservice");
 
-// Mirror of the tier table in pointService — kept local so profileService has
-// no hard dependency on pointService.
-const TIERS = [
-  { name: "Bronze",   min: 0,    max: 99,       gem: "B", color: "#C87533" },
-  { name: "Silver",   min: 100,  max: 299,      gem: "S", color: "#9EA3A8" },
-  { name: "Gold",     min: 300,  max: 699,      gem: "G", color: "#D4A017" },
-  { name: "Platinum", min: 700,  max: 1499,     gem: "P", color: "#7F77DD" },
-  { name: "Diamond",  min: 1500, max: Infinity,  gem: "D", color: "#D85A30" },
-];
-
-function getTier(reputation) {
-  return TIERS.find((t) => reputation >= t.min && reputation <= t.max) ?? TIERS[0];
-}
-
-async function getPublicProfile(targetUserId) {
+async function getPublicProfile(targetUserId, viewerId) {
   const userId = Number(targetUserId);
 
   const [
     user,
-    submissions,
-    critiqueCount,
-    recentCritiques,
-    wallet,
-    threads,
-    commentedThreadRows,
-    threadCommentCount,
-    draftPlan,
-    daysChallenge,
-    sprintCount,
-    draftCount,
+    followerCount,
+    followingCount,
+    followRow,
+    likeCount,
+    likeRow,
+    cardsSentCount,
+    draftPlansRaw,
   ] = await Promise.all([
-    // ── User ──────────────────────────────────────────────────────────────────
+    // ── User (public fields) ────────────────────────────────────────────────
     prisma.user.findUnique({
       where:  { id: userId, isDeleted: false },
       select: {
         id: true, username: true, bio: true, avatar: true,
         role: true, createdAt: true, socialLinks: true,
+        country: true, genre: true, funFact: true,
+        favoriteSprintTime: true, favoriteSprintDays: true,
+        allowAskMeAnything: true,
+        timezone: true, // needed to compute this writer's streak correctly below
       },
     }),
 
-    // ── Submissions (chapters posted, public) ─────────────────────────────────
-    prisma.feedbackSubmission.findMany({
-      where:   { userId, isDraft: false },
-      orderBy: { createdAt: "desc" },
-      take:    10,
+    // ── Follow counts ────────────────────────────────────────────────────────
+    prisma.follow.count({ where: { followingId: userId } }),
+    prisma.follow.count({ where: { followerId: userId } }),
+
+    // ── Is the viewer following this profile? ──────────────────────────────
+    viewerId
+      ? prisma.follow.findUnique({
+          where: { followerId_followingId: { followerId: viewerId, followingId: userId } },
+        })
+      : null,
+
+    // ── Like count ────────────────────────────────────────────────────────
+    prisma.profileLike.count({ where: { likedUserId: userId } }),
+
+    // ── Has the viewer liked this profile? ─────────────────────────────────
+    viewerId
+      ? prisma.profileLike.findUnique({
+          where: { likerId_likedUserId: { likerId: viewerId, likedUserId: userId } },
+        })
+      : null,
+
+    // ── Mailbox cards sent ────────────────────────────────────────────────
+    prisma.mailboxCard.count({ where: { senderId: userId } }),
+
+    // ── Draft plans (current, with enough to compute % complete) ───────────
+    prisma.draftPlan.findMany({
+      where:   { userId },
+      orderBy: { updatedAt: "desc" },
       select:  {
-        id: true, title: true, genre: true, status: true,
-        critiqueCount: true, wordCountTier: true, createdAt: true,
-      },
-    }),
-
-    // ── Total critiques given ─────────────────────────────────────────────────
-    prisma.feedbackResponse.count({ where: { criticId: userId } }),
-
-    // ── Recent critiques given (for the card list) ────────────────────────────
-    prisma.feedbackResponse.findMany({
-      where:   { criticId: userId },
-      orderBy: { createdAt: "desc" },
-      take:    5,
-      select:  {
-        id: true, pointsEarned: true, createdAt: true,
-        submission: { select: { id: true, title: true } },
-      },
-    }),
-
-    // ── Wallet — reputation only (posting balance stays private) ──────────────
-    prisma.feedbackPoint.findUnique({
-      where:  { userId },
-      select: { reputation: true },
-    }),
-
-    // ── Threads posted ────────────────────────────────────────────────────────
-    prisma.thread.findMany({
-      where:   { authorId: userId },
-      orderBy: { createdAt: "desc" },
-      take:    10,
-      select:  {
-        id: true, title: true, createdAt: true,
-        tag: true,
-        _count:   { select: { comments: true, likes: true } },
-      },
-    }),
-
-    // ── Threads the user commented on (distinct, most recent comment first) ───
-    // We grab the user's most recent comments, then pull the distinct threads.
-    prisma.threadComment.findMany({
-      where:    { authorId: userId },
-      orderBy:  { createdAt: "desc" },
-      take:     50, // over-fetch so we get 10 distinct threads after dedup
-      distinct: ["threadId"],
-      select:   {
-        createdAt: true,
-        thread: {
-          select: {
-            id: true, title: true, createdAt: true,
-            author:   { select: { id: true, username: true } },
-            tag: true,
-            _count:   { select: { comments: true, likes: true } },
-          },
+        id: true, storyTitle: true, goalType: true,
+        targetLength: true, wordsWrittenSoFar: true, isCompleted: true,
+        progressLogs: {
+          orderBy: { logDate: "desc" },
+          take:    1,
+          select:  { totalSoFar: true },
         },
       },
     }),
-
-    // ── Thread comment count (total comments left by this user) ───────────────
-    prisma.threadComment.count({ where: { authorId: userId } }),
-
-    // ── Draft plan (public — story identity fields only) ──────────────────────
-    prisma.draftPlan.findUnique({
-      where:  { userId },
-      select: {
-        id: true, storyTitle: true, premise: true, isCompleted: true,
-        characters: { select: { id: true, name: true, description: true } },
-      },
-    }),
-
-    // ── Active days challenge (if any) ────────────────────────────────────────
-    prisma.daysChallenge.findUnique({
-      where:  { userId },
-      select: {
-        id: true, duration: true, status: true,
-        startDate: true, endDate: true,
-        storyTitle: true, workingGoal: true,
-        goalType: true, dailyGoal: true,
-        focuses: { select: { focus: true } },
-      },
-    }),
-
-    // ── Sprint count (covers both starting a solo sprint and joining a group
-    //    sprint — both create a Sprint row for the user) — powers the
-    //    "Start your first sprint" checklist item ──────────────────────────
-    prisma.sprint.count({ where: { userId } }),
-
-    // ── Writing draft count — powers the "Create your first draft" checklist
-    //    item ──────────────────────────────────────────────────────────────
-    prisma.writingDraft.count({ where: { userId } }),
   ]);
 
   if (!user) throw new Error("User not found");
 
-  // Deduplicate and cap at 10 threads commented on, excluding threads the user
-  // also authored (those appear in "threads posted" already).
-  const postedIds = new Set(threads.map((t) => t.id));
-  const threadsCommentedOn = commentedThreadRows
-    .map((row) => ({ ...row.thread, lastCommentAt: row.createdAt }))
-    .filter((t) => !postedIds.has(t.id))
-    .slice(0, 10);
+  // Timezone-aware streaks, from the same helper the rest of the app uses
+  // (workspaceService, etc.) — see writingActivityService.getStreaks.
+  const { currentStreak, longestStreak } = await writingActivityService.getStreaks(
+    userId,
+    user.timezone ?? "UTC"
+  );
 
-  // Build reputation tier (public)
-  const reputation = wallet?.reputation ?? 0;
-  const reputationTier = getTier(reputation);
+  // timezone was only selected to feed getStreaks above — not part of the
+  // public profile payload.
+  const { timezone, ...publicUser } = user;
+
+  const draftPlans = draftPlansRaw.map((plan) => {
+    const current = plan.progressLogs[0]?.totalSoFar ?? plan.wordsWrittenSoFar;
+    const percentage = plan.targetLength > 0
+      ? Math.min(100, Math.round((current / plan.targetLength) * 100))
+      : 0;
+
+    return {
+      id:          plan.id,
+      storyTitle:  plan.storyTitle,
+      goalType:    plan.goalType,
+      current,
+      target:      plan.targetLength,
+      percentage,
+      isCompleted: plan.isCompleted,
+    };
+  });
 
   return {
-    user,
-    submissions,
-    submissionCount: submissions.length,
-    critiquesGiven:  critiqueCount,
-    recentCritiques,
-    reputation,
-    reputationTier,
-    threads,
-    threadsCommentedOn,
-    threadCommentCount,
-    draftPlan:    draftPlan  ?? null,
-    daysChallenge: (daysChallenge?.status === "ACTIVE") ? daysChallenge : null,
-    sprintCount,
-    draftCount,
+    user: publicUser,
+    followerCount,
+    followingCount,
+    isFollowing: !!followRow,
+    likeCount,
+    isLiked: !!likeRow,
+    currentStreak,
+    longestStreak,
+    cardsSentCount,
+    draftPlans,
   };
 }
 
-module.exports = { getPublicProfile };
+// ── Follow graph ─────────────────────────────────────────────────────────────
+
+async function followUser(followerId, followingId) {
+  if (followerId === followingId) {
+    throw new Error("You can't follow yourself.");
+  }
+
+  return prisma.follow.upsert({
+    where:  { followerId_followingId: { followerId, followingId } },
+    update: {},
+    create: { followerId, followingId },
+  });
+}
+
+async function unfollowUser(followerId, followingId) {
+  await prisma.follow.deleteMany({ where: { followerId, followingId } });
+}
+
+async function getFollowers(userId, { limit = 20, cursor } = {}) {
+  const rows = await prisma.follow.findMany({
+    where:   { followingId: userId },
+    orderBy: { createdAt: "desc" },
+    take:    limit,
+    ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+    select:  {
+      id: true, createdAt: true,
+      follower: { select: { id: true, username: true, avatar: true, bio: true } },
+    },
+  });
+
+  return rows.map((r) => ({ ...r.follower, followedAt: r.createdAt, followRowId: r.id }));
+}
+
+async function getFollowing(userId, { limit = 20, cursor } = {}) {
+  const rows = await prisma.follow.findMany({
+    where:   { followerId: userId },
+    orderBy: { createdAt: "desc" },
+    take:    limit,
+    ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+    select:  {
+      id: true, createdAt: true,
+      following: { select: { id: true, username: true, avatar: true, bio: true } },
+    },
+  });
+
+  return rows.map((r) => ({ ...r.following, followedAt: r.createdAt, followRowId: r.id }));
+}
+
+// ── Profile likes ────────────────────────────────────────────────────────────
+
+async function likeProfile(likerId, likedUserId) {
+  if (likerId === likedUserId) {
+    throw new Error("You can't like your own profile.");
+  }
+
+  return prisma.profileLike.upsert({
+    where:  { likerId_likedUserId: { likerId, likedUserId } },
+    update: {},
+    create: { likerId, likedUserId },
+  });
+}
+
+async function unlikeProfile(likerId, likedUserId) {
+  await prisma.profileLike.deleteMany({ where: { likerId, likedUserId } });
+}
+
+// ── Editing your own profile extras ──────────────────────────────────────────
+// country / genre / funFact / favoriteSprintTime / favoriteSprintDays.
+// Only touches fields that were actually passed in.
+
+async function updateProfileExtras(userId, updates) {
+  const data = {};
+
+  if (updates.country !== undefined) data.country = updates.country;
+  if (updates.genre !== undefined) data.genre = updates.genre;
+  if (updates.funFact !== undefined) data.funFact = updates.funFact;
+  if (updates.favoriteSprintTime !== undefined) data.favoriteSprintTime = updates.favoriteSprintTime;
+  if (updates.favoriteSprintDays !== undefined) data.favoriteSprintDays = updates.favoriteSprintDays;
+  if (updates.allowAskMeAnything !== undefined) data.allowAskMeAnything = !!updates.allowAskMeAnything;
+
+  return prisma.user.update({
+    where:  { id: userId },
+    data,
+    select: {
+      id: true, country: true, genre: true, funFact: true,
+      favoriteSprintTime: true, favoriteSprintDays: true,
+      allowAskMeAnything: true,
+    },
+  });
+}
+
+module.exports = {
+  getPublicProfile,
+  followUser,
+  unfollowUser,
+  getFollowers,
+  getFollowing,
+  likeProfile,
+  unlikeProfile,
+  updateProfileExtras,
+};

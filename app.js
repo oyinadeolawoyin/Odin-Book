@@ -2,44 +2,45 @@ const express = require("express");
 require("dotenv").config();
 const app = express();
 const http = require("http");
+const path = require("path");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
 const multer = require("multer");
 const { initSocket } = require("./src/socket");
-// require("./jobs/scheduledjobs");
-const { startChallengeCron } = require("./jobs/challengecron");
-const { startDaysChallengeCron } = require("./jobs/dayschallengeexpirycron");
-const { startDaysChallengeReminderCron } = require("./jobs/dayschallengeremindercron");
+require("./jobs/birthdaycron");
+
+
 const { startDraftPlanReminderCron } = require("./jobs/draftplanremindercron");
-const { startSprintReminderCron } = require("./jobs/sprintremindercron");
 const { startEventFinalizeCron } = require("./jobs/eventcron");
-const { startMiniChallengeCron } = require("./jobs/minichallengecron");
-const { startAutoEndStaleSprintsCron } = require("./jobs/autoendstalesprintscron");
+const { startBragCleanupCron } = require("./jobs/bragcleanupcron");
 
 const rateLimit = require("express-rate-limit");
 
 const authRoutes        = require("./src/routes/authRoutes");
-const groupSprintRoutes = require("./src/routes/groupSprintRoutes");
+// GroupSprint (LiveKit rooms, multi-writer tracking) is disconnected for
+// now — replaced below by a minimal solo sprint flow (duration + checkin).
+// const groupSprintRoutes = require("./src/routes/groupSprintRoutes");
+const sprintRoutes      = require("./src/routes/sprintroutes");
 const sprintRoomRoutes  = require("./src/routes/sprintroomroutes");
 const userRoutes        = require("./src/routes/userRoutes");
 const notificationRoutes = require("./src/routes/notificationRoutes");
 const blogRoutes        = require("./src/routes/blogRoutes");
 const soundscapesRoutes = require("./src/routes/soundscaperoutes");
 const feedbackRoutes    = require("./src/routes/feedbackRoutes"); 
-const discoveryRoutes = require("./src/routes/discoveryroutes");
-const leaderboardRoutes = require("./src/routes/leaderboardRoutes");
 const draftRoutes = require("./src/routes/draftroutes");
 const reportRoutes = require("./src/routes/reportRoutes");
-const challengeRoutes = require("./src/routes/challengeroutes");
 const threadRoutes = require("./src/routes/threadroutes");
 const eventRoutes = require("./src/routes/eventroutes");
-const miniChallengeRoutes = require("./src/routes/minichallengeroutes");
 const draftPlanRoutes = require("./src/routes/draftplanroutes");
-const dayChallengeRoutes = require("./src/routes/dayschallengeroutes");
 const directMessageRoutes = require("./src/routes/directmessageroutes");
 const profileRoutes = require("./src/routes/profileroutes");
+const dictionaryRoutes = require("./src/routes/dictionaryroutes");
+const workspaceRoutes = require("./src/routes/workspaceroutes");
+const draftFolderRoutes = require("./src/routes/draftfolderroutes");
+const shareRoutes = require("./src/routes/shareRoutes");
+const mailboxRoutes = require("./src/routes/mailboxRoutes");
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" })); // raised from the default 100kb — the brag card's captured PNG travels here as base64
 app.use(express.urlencoded({ extended: true }));
 
 app.use(cors({
@@ -57,34 +58,37 @@ app.use(cookieParser());
 // });
 
 // app.use("/api/", limiter); // applies to all your API routes
-startDaysChallengeCron();
-startDaysChallengeReminderCron();
+
 startDraftPlanReminderCron();
-startSprintReminderCron();
 startEventFinalizeCron();
-startMiniChallengeCron();
-startAutoEndStaleSprintsCron();
+startBragCleanupCron();
 
 app.use("/api/auth",          authRoutes);
-app.use("/api/sprint",        groupSprintRoutes);
+app.use("/api/sprint",        sprintRoutes);
 app.use("/api/sprint-room",   sprintRoomRoutes);
 app.use("/api/users",         userRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/blog",          blogRoutes);
 app.use("/api/soundscapes",   soundscapesRoutes);
 app.use("/api/feedback",      feedbackRoutes); 
-app.use("/api/discovery", discoveryRoutes);
-app.use("/api/leaderboard", leaderboardRoutes)
 app.use("/api/drafts", draftRoutes);
 app.use("/api/reports", reportRoutes);
-app.use("/api/challenge", challengeRoutes);
 app.use("/api/threads", threadRoutes);
 app.use("/api/events", eventRoutes);
-app.use("/api/mini-challenges", miniChallengeRoutes);
 app.use("/api/draftplan", draftPlanRoutes);
-app.use("/api/days-challenge", dayChallengeRoutes);
 app.use("/api/direct-messages", directMessageRoutes);
 app.use("/api/profile", profileRoutes);
+app.use("/api/dictionary", dictionaryRoutes);
+app.use("/api/workspace", workspaceRoutes);
+app.use("/api/draftfolders", draftFolderRoutes);
+app.use("/api", shareRoutes); // /api/share/sprint/:id, /api/og/sprint-room/:id.png, /api/brag/upload, /api/share/brag/:id — no auth, see sharerroutes.js
+app.use("/api/mailbox", mailboxRoutes);
+
+// Static host for uploaded brag-card images (uploadBragImage in
+// sharecontroller.js writes to src/uploads/brag). Public and
+// unauthenticated on purpose — X/Tumblr's crawlers need to fetch these
+// directly, same as everything else in sharerroutes.js.
+app.use("/api/uploads", express.static(path.join(__dirname, "src", "uploads")));
 
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError || err.message === "Unsupported file type") {

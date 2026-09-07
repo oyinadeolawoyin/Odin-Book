@@ -1,40 +1,31 @@
 // src/services/draftService.js
 const prisma = require("../config/prismaClient");
-
-// ─── SHARED INCLUDES ──────────────────────────────────────────────────────────
-
-const draftWithSource = {
-  sourceSubmission: {
-    include: {
-      responses: {
-        include: {
-          critic: { select: { id: true, username: true, avatar: true } },
-          _count: { select: { upvotes: true } },
-        },
-        orderBy: { createdAt: "asc" },
-      },
-      paragraphComments: {
-        include: {
-          author: { select: { id: true, username: true, avatar: true } },
-          _count: { select: { upvotes: true } },
-          replies: {
-            include: { author: { select: { id: true, username: true, avatar: true } } },
-            orderBy: { createdAt: "asc" },
-          },
-        },
-        orderBy: [{ paragraphIndex: "asc" }, { createdAt: "asc" }],
-      },
-    },
-  },
-};
+const { todayInTimezone } = require("../utilis/timezone");
+const { recordDraftActivity } = require("./writingactivityservice");
+const draftFolderService = require("./draftfolderservice");
 
 // ─── CREATE ───────────────────────────────────────────────────────────────────
 
-async function createDraft(userId, { title = null, content = "" } = {}) {
+// Every draft file has to live in a folder now. If the caller doesn't pass
+// one (or passes one that isn't theirs), fall back to their default
+// "General" folder rather than failing outright — a draft should never end
+// up with nowhere to live.
+async function resolveFolderId(userId, folderId) {
+  if (folderId) {
+    const folder = await prisma.draftFolder.findFirst({ where: { id: Number(folderId), userId } });
+    if (folder) return folder.id;
+  }
+  const general = await draftFolderService.getOrCreateDefaultGeneralFolder(userId);
+  return general.id;
+}
+
+async function createDraft(userId, { folderId, title = null, content = "" } = {}) {
+  const resolvedFolderId = await resolveFolderId(userId, folderId);
   const wordCount = countWords(content);
   return prisma.writingDraft.create({
     data: {
       userId,
+      folderId: resolvedFolderId,
       title:     title?.trim() || null,
       content,
       wordCount,
@@ -44,9 +35,13 @@ async function createDraft(userId, { title = null, content = "" } = {}) {
 
 // ─── READ ─────────────────────────────────────────────────────────────────────
 
-async function getUserDrafts(userId, { page = 1, limit = 20, starredOnly = false } = {}) {
+async function getUserDrafts(userId, { page = 1, limit = 20, starredOnly = false, folderId = null } = {}) {
   const skip = (page - 1) * limit;
-  const where = { userId, ...(starredOnly ? { isStarred: true } : {}) };
+  const where = {
+    userId,
+    ...(starredOnly ? { isStarred: true } : {}),
+    ...(folderId ? { folderId: Number(folderId) } : {}),
+  };
 
   const [items, total] = await Promise.all([
     prisma.writingDraft.findMany({
@@ -60,29 +55,8 @@ async function getUserDrafts(userId, { page = 1, limit = 20, starredOnly = false
         wordCount:           true,
         createdAt:           true,
         updatedAt:           true,
-        sourceSubmissionId:  true,
         isStarred:           true,
-        // Staging fields — let the drafts page tell a chapter that's
-        // genuinely staged-and-waiting-on-points apart from an ordinary
-        // work-in-progress draft, and post it directly without re-opening
-        // the submission form.
-        isStagedForFeedback:    true,
-        stagedGenre:             true,
-        stagedSummary:           true,
-        stagedWordCountTier:     true,
-        stagedDraftStage:        true,
-        stagedContentWarnings:   true,
-        stagedFeedbackWanted:    true,
-        sourceSubmission: {
-          select: {
-            id:            true,
-            title:         true,
-            genre:         true,
-            isDraft:       true,
-            critiqueCount: true,
-            _count: { select: { responses: true, paragraphComments: true } },
-          },
-        },
+        folderId:            true,
       },
     }),
     prisma.writingDraft.count({ where }),
@@ -109,8 +83,10 @@ async function toggleDraftStar(draftId, userId) {
 
 async function getDraftById(draftId, userId) {
   const draft = await prisma.writingDraft.findFirst({
-    where:   { id: draftId, userId },
-    include: draftWithSource,
+    where: { id: draftId, userId },
+    include: {
+      folder: { select: { id: true, name: true, draftPlanId: true } },
+    },
   });
   if (!draft) throw new Error("Draft not found.");
   return draft;
@@ -125,9 +101,8 @@ async function getDraftsForSprintPicker(userId) {
       title:     true,
       wordCount: true,
       updatedAt: true,
-      sourceSubmission: {
-        select: { id: true, title: true, genre: true },
-      },
+      folderId:  true,
+      folder:    { select: { name: true, draftPlanId: true } },
     },
   });
 }
@@ -141,13 +116,31 @@ async function updateDraft(draftId, userId, { title, content }) {
   if (!draft) throw new Error("Draft not found.");
 
   const data = {};
+  let newWordCount;
   if (title   !== undefined) data.title     = title?.trim() || null;
   if (content !== undefined) {
+    newWordCount   = countWords(content);
     data.content   = content;
-    data.wordCount = countWords(content);
+    data.wordCount = newWordCount;
   }
 
-  return prisma.writingDraft.update({ where: { id: draftId }, data });
+  const updated = await prisma.writingDraft.update({ where: { id: draftId }, data });
+
+  // Workspace output tracking — net positive word delta only (trims/edits
+  // that shrink the count aren't "output"). Fire-and-forget: never let a
+  // stats-tracking hiccup block the actual save.
+  if (newWordCount !== undefined) {
+    const delta = newWordCount - draft.wordCount;
+    if (delta > 0) {
+      const user     = await prisma.user.findUnique({ where: { id: userId }, select: { timezone: true } });
+      const timezone = user?.timezone ?? "UTC";
+      recordDraftActivity(userId, todayInTimezone(timezone), delta).catch((err) =>
+        console.error("recordDraftActivity error:", err)
+      );
+    }
+  }
+
+  return updated;
 }
 
 // ─── DELETE ───────────────────────────────────────────────────────────────────
@@ -158,200 +151,13 @@ async function deleteDraft(draftId, userId) {
   });
   if (!draft) throw new Error("Draft not found.");
 
-  if (draft.sourceSubmissionId) {
-    await prisma.feedbackSubmission.delete({
-      where: { id: draft.sourceSubmissionId },
-    });
-  } else {
-    await prisma.writingDraft.delete({ where: { id: draftId } });
-  }
-
+  await prisma.writingDraft.delete({ where: { id: draftId } });
   return { deleted: true };
-}
-
-// ─── UNPUBLISH → DRAFT ────────────────────────────────────────────────────────
-
-async function unpublishSubmission(submissionId, userId) {
-  const submission = await prisma.feedbackSubmission.findFirst({
-    where: { id: submissionId, userId },
-  });
-  if (!submission) throw new Error("Submission not found.");
-  if (submission.isDraft) throw new Error("Submission is already unpublished.");
-
-  const [, draft] = await prisma.$transaction(async (tx) => {
-    // Mark submission as a hidden draft
-    const updated = await tx.feedbackSubmission.update({
-      where: { id: submissionId },
-      data: {
-        isDraft:       true,
-        unpublishedAt: new Date(),
-      },
-    });
-
-    // Create draft mirror — idempotent via upsert
-    const writingDraft = await tx.writingDraft.upsert({
-      where:  { sourceSubmissionId: submissionId },
-      update: {},
-      create: {
-        userId,
-        title:              submission.title,
-        content:            submission.content,
-        wordCount:          submission.actualWordCount,
-        sourceSubmissionId: submissionId,
-      },
-    });
-
-    return [updated, writingDraft];
-  });
-
-  return draft;
-}
-
-// ─── REPUBLISH FROM DRAFT ─────────────────────────────────────────────────────
-
-async function republishDraft(draftId, userId) {
-  const draft = await prisma.writingDraft.findFirst({
-    where: { id: draftId, userId },
-  });
-  if (!draft)                    throw new Error("Draft not found.");
-  if (!draft.sourceSubmissionId) throw new Error("This draft has no linked submission to republish.");
-
-  const submission = await prisma.feedbackSubmission.findFirst({
-    where: { id: draft.sourceSubmissionId, userId },
-  });
-  if (!submission)        throw new Error("Linked submission not found.");
-  if (!submission.isDraft) throw new Error("Submission is already published.");
-
-  // Check one-spotlight-at-a-time rule
-  const existingSpotlight = await prisma.feedbackSubmission.findFirst({
-    where: {
-      userId,
-      isDraft:    false,
-      status:     { in: ["QUEUE", "SPOTLIGHT"] },
-      id:         { not: submission.id },
-    },
-    select: { id: true, title: true },
-  });
-  if (existingSpotlight) {
-    throw new Error(
-      `You already have a chapter in the spotlight: "${existingSpotlight.title}". ` +
-      `It needs to receive 3 critiques before you can republish.`
-    );
-  }
-
-  // Decide which status to give it when it goes back live
-  const spotlightCount = await prisma.feedbackSubmission.count({
-    where: { status: "SPOTLIGHT" },
-  });
-  const newStatus = spotlightCount < 6 ? "SPOTLIGHT" : "QUEUE";
-
-  await prisma.$transaction(async (tx) => {
-    await tx.feedbackSubmission.update({
-      where: { id: submission.id },
-      data: {
-        title:           draft.title || submission.title,
-        content:         draft.content,
-        actualWordCount: draft.wordCount,
-        isDraft:         false,
-        status:          newStatus,
-        unpublishedAt:   null,
-      },
-    });
-
-    await tx.writingDraft.delete({ where: { id: draftId } });
-  });
-
-  return { republished: true, submissionId: submission.id };
-}
-
-// ─── POST DRAFT TO FEEDBACK HUB ──────────────────────────────────────────────
-
-async function getDraftForPosting(draftId, userId) {
-  const draft = await prisma.writingDraft.findFirst({
-    where: { id: draftId, userId },
-  });
-  if (!draft) throw new Error("Draft not found.");
-  if (draft.sourceSubmissionId) {
-    throw new Error(
-      "This draft is linked to an existing submission. Use republish instead."
-    );
-  }
-  return draft;
-}
-
-// ─── STAGE DRAFT FOR FEEDBACK (written, but not enough points to post yet) ──
-
-/**
- * Save a freshly-written chapter as "staged for feedback".
- *
- * This is the path the submission form falls back to when the writer has
- * finished a chapter and chosen a tier, but doesn't have enough posting
- * points to send it to the Critique Hub right now. Instead of losing their
- * work, it's saved as a WritingDraft with isStagedForFeedback = true, and
- * the submission metadata (genre, summary, tier, draft stage, etc.) is
- * stored alongside it so the chapter can be posted in one click later —
- * once the writer earns enough points by critiquing — without re-filling
- * the whole form.
- *
- * isStagedForFeedback is what lets the frontend tell "a chapter is genuinely
- * waiting to be unlocked" apart from an ordinary work-in-progress draft the
- * writer is just drafting on their own with no submission intent yet.
- *
- * @param {number} userId
- * @param {object} data
- * @param {number|null} data.draftId  — pass the previously-staged draft's id to update it in place
- */
-async function stageDraftForFeedback(userId, {
-  draftId = null,
-  title,
-  content,
-  genre,
-  summary,
-  wordCountTier,
-  draftStage,
-  contentWarnings = [],
-  feedbackWanted  = [],
-} = {}) {
-  if (!content?.trim()) throw new Error("Your chapter is empty. Write something first.");
-
-  const stagedFields = {
-    title:                  title?.trim() || null,
-    content,
-    wordCount:              countWords(content),
-    isStagedForFeedback:    true,
-    stagedGenre:            genre || null,
-    stagedSummary:          summary || null,
-    stagedWordCountTier:    wordCountTier || null,
-    stagedDraftStage:       draftStage || null,
-    stagedContentWarnings:  contentWarnings,
-    stagedFeedbackWanted:   feedbackWanted,
-    stagedAt:               new Date(),
-  };
-
-  if (draftId) {
-    const existing = await prisma.writingDraft.findFirst({ where: { id: draftId, userId } });
-    if (!existing) throw new Error("Draft not found.");
-    if (existing.sourceSubmissionId) {
-      throw new Error("This draft is linked to a live submission — use unpublish/republish instead.");
-    }
-    return prisma.writingDraft.update({ where: { id: draftId }, data: stagedFields });
-  }
-
-  return prisma.writingDraft.create({ data: { userId, ...stagedFields } });
-}
-
-// Returns the writer's current staged-for-feedback draft (most recent), or null.
-// Used to power accurate "unlock your post" messaging — never a generic guess.
-async function getStagedDraft(userId) {
-  return prisma.writingDraft.findFirst({
-    where:   { userId, isStagedForFeedback: true, sourceSubmissionId: null },
-    orderBy: { stagedAt: "desc" },
-  });
 }
 
 // ─── SPRINT AUTO-SAVE ─────────────────────────────────────────────────────────
 
-async function sprintAutoSave(userId, { draftId, title, content }) {
+async function sprintAutoSave(userId, { draftId, folderId, title, content }) {
   if (draftId) {
     const draft = await prisma.writingDraft.findFirst({
       where: { id: draftId, userId },
@@ -368,9 +174,12 @@ async function sprintAutoSave(userId, { draftId, title, content }) {
     });
   }
 
+  const resolvedFolderId = await resolveFolderId(userId, folderId);
+
   return prisma.writingDraft.create({
     data: {
       userId,
+      folderId: resolvedFolderId,
       title:     title?.trim() || null,
       content,
       wordCount: countWords(content),
@@ -382,10 +191,13 @@ async function sprintAutoSave(userId, { draftId, title, content }) {
 //
 // Writer-private scratch notes on a draft. paragraphIndex === null/undefined
 // means a whole-draft note; any other integer is a paragraph note. These only
-// ever exist on WritingDraft rows, so they naturally vanish (cascade delete)
-// the moment a draft becomes a live submission (postDraftToHub / republishDraft
-// both delete the WritingDraft row) — that's what keeps them out of the
-// feedback/critique stage without any extra flag to check.
+// ever exist on WritingDraft rows and are cascade-deleted along with the
+// draft itself.
+//
+// updateStickyNote also accepts paragraphIndex (see below) so the client can
+// re-pin a note after a paragraph insertion/deletion shifts everything below
+// it — see useDraftStickyNotes.js's resyncParagraphIndex for the client side
+// of this.
 
 const STICKY_NOTE_COLORS = ["YELLOW", "PINK", "BLUE", "GREEN", "PURPLE", "ORANGE"];
 
@@ -439,7 +251,7 @@ async function createStickyNote(draftId, userId, {
   });
 }
 
-async function updateStickyNote(draftId, noteId, userId, { color, text, items } = {}) {
+async function updateStickyNote(draftId, noteId, userId, { color, text, items, paragraphIndex } = {}) {
   await assertOwnsDraft(draftId, userId);
   const note = await prisma.stickyNote.findFirst({ where: { id: noteId, draftId } });
   if (!note) throw new Error("Sticky note not found.");
@@ -448,6 +260,15 @@ async function updateStickyNote(draftId, noteId, userId, { color, text, items } 
   if (color !== undefined) data.color = STICKY_NOTE_COLORS.includes(color) ? color : note.color;
   if (text  !== undefined) data.text  = (text || "").trim();
   if (items !== undefined) data.items = normalizeItems(items);
+  // Lets the client re-pin a note after paragraph insertion/deletion shifts
+  // everything below it — same clamping createStickyNote already applies.
+  // null clears it back to a whole-draft note; any other value clamps to
+  // a non-negative int.
+  if (paragraphIndex !== undefined) {
+    data.paragraphIndex = paragraphIndex === null
+      ? null
+      : Math.max(0, Number(paragraphIndex) || 0);
+  }
 
   // Guard against ending up with a fully empty note
   const nextText  = data.text  !== undefined ? data.text  : note.text;
@@ -483,11 +304,6 @@ module.exports = {
   getDraftsForSprintPicker,
   updateDraft,
   deleteDraft,
-  unpublishSubmission,
-  republishDraft,
-  getDraftForPosting,
-  stageDraftForFeedback,
-  getStagedDraft,
   sprintAutoSave,
   getStickyNotes,
   createStickyNote,

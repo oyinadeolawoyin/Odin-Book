@@ -1,7 +1,7 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const cookie = require("cookie");
-const groupSprintService = require("../services/groupSprintService");
+const sprintService = require("../services/sprintservice");
 
 let io;
 
@@ -38,15 +38,21 @@ function initSocket(server) {
       socket.leave(`sprint-room:${sprintRoomId}`);
     });
 
-    // Live word-count push — writes through the same service function the
-    // HTTP path used, then broadcasts to everyone else in the room.
+    // Live word-count push — writes through the solo-sprint service (every
+    // writer runs their own independent Sprint now — see sprintservice.js
+    // — there's no GroupSprint to attach this to anymore), then broadcasts
+    // to everyone else in the room. userId is taken from the authenticated
+    // socket (socket.user, set during the handshake above), never from the
+    // payload — a client has no business pushing progress for anyone but
+    // itself.
     socket.on("sprint:progress", async ({ sprintId, sprintRoomId, currentWordCount }) => {
       try {
-        const updated = await groupSprintService.updateSprintProgress(
+        const updated = await sprintService.updateSprintProgress(
           Number(sprintId),
+          Number(socket.user.id),
           Number(currentWordCount) || 0
         );
-        if (!updated) return; // sprint already ended server-side — ignore late ping
+        if (!updated) return; // not their sprint, or it already ended — ignore late/invalid ping
 
         io.to(`sprint-room:${sprintRoomId}`).emit("sprint:progress", {
           userId: updated.userId,

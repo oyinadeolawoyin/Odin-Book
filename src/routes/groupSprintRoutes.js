@@ -3,15 +3,6 @@ const router = express.Router();
 const groupSprintController = require("../controllers/groupSprintController");
 const { authenticateJWT } = require("../config/jwt");
 
-// ─── Bot secret middleware ────────────────────────────────────
-
-function requireBotSecret(req, res, next) {
-  if (req.headers["x-bot-secret"] !== process.env.BOT_SECRET) {
-    return res.status(401).json({ message: "Unauthorized" });
-  }
-  next();
-}
-
 // ─── GROUP SPRINT ─────────────────────────────────────────────
 router.get("/activeGroupSprints", groupSprintController.fetchAllActiveGroupSprints);
 router.get("/lastGroupSprint", groupSprintController.fetchLastGroupSprint);

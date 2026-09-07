@@ -193,8 +193,15 @@ async function deleteUser(userId) {
 }
 
 
-async function fetchFoundingWriters() {
-  return await prisma.user.findMany({
+/**
+ * Fetch all founding writers, optionally flagged with whether `viewerId`
+ * already follows each one (and which row, if any, is the viewer's own).
+ * viewerId is undefined for logged-out visitors (e.g. the About page) —
+ * in that case every writer just comes back with isFollowing: false.
+ * @param {number} [viewerId]
+ */
+async function fetchFoundingWriters(viewerId) {
+  const writers = await prisma.user.findMany({
     where: { role: "FOUNDING_WRITER", isDeleted: false },
     select: {
       id: true,
@@ -205,6 +212,22 @@ async function fetchFoundingWriters() {
     },
     orderBy: { id: "asc" },
   });
+
+  if (!viewerId || writers.length === 0) {
+    return writers.map((w) => ({ ...w, isFollowing: false, isCurrentUser: w.id === viewerId }));
+  }
+
+  const follows = await prisma.follow.findMany({
+    where: { followerId: viewerId, followingId: { in: writers.map((w) => w.id) } },
+    select: { followingId: true },
+  });
+  const followingSet = new Set(follows.map((f) => f.followingId));
+
+  return writers.map((w) => ({
+    ...w,
+    isFollowing: followingSet.has(w.id),
+    isCurrentUser: w.id === viewerId,
+  }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

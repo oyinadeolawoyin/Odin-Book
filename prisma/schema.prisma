@@ -36,7 +36,15 @@ model User {
   projectType      String?   // "novel" | "fanfic" | "short_story" | "other"
   timeOnProject    String?   // "less_1month" | "1_6months" | "6_12months" | "over_1year"
   biggestBlock     String? 
-  
+
+  // ── public profile extras ────────────────────────────────────────────────
+  country              String?    // free-text country / region
+  genre                String?    // genre of story they mainly write, e.g. "Fantasy"
+  funFact              String?    // short fun fact shown on the profile
+  favoriteSprintTime   String?    // free-text, e.g. "Evenings (8–10pm WAT)"
+  favoriteSprintDays   WeekDay[]  @default([]) // days they like to sprint on
+  allowAskMeAnything   Boolean    @default(false) // opt-in: lets other writers message them straight from their profile
+
   blogLastSeen  BlogLastSeen?
 
   challengeLongestStreak   Int     @default(0)  
@@ -46,7 +54,6 @@ model User {
   challengeCheckIns        ChallengeCheckIn[]
 
   notificationPreference NotificationPreference?
-  sprintReminderOptIn    SprintReminderOptIn?  
   groupSprints        GroupSprint[]
   sprints             Sprint[]
   sprintRoomMessages  SprintRoomMessage[]
@@ -60,6 +67,9 @@ model User {
   blogPostsReviewed   BlogPost[]     @relation("BlogPostReviewer")
   soundscapes         Soundscape[]
   writingDrafts       WritingDraft[]
+  draftFolders        DraftFolder[]
+  workspaceProfile      WorkspaceProfile?
+  dailyWritingActivity  DailyWritingActivity[]
   
 
   // ── feedback hub relations ──────────────────────────────────────────────
@@ -90,8 +100,12 @@ model User {
   threadReplyLikes    ThreadReplyLike[]
 
   // ── draft plan relations ─────────────────────────────────────────────────
-  draftPlan            DraftPlan?
+  // A writer can hold several plans now (DraftPlan.userId is no longer
+  // @unique) — this back-relation must be a list, not a single optional
+  // object, or the one-to-one @relation fails to validate (P1012).
+  draftPlans           DraftPlan[]
   draftProgressLogs    DraftProgressLog[]
+  draftBonusQuests     DraftBonusQuest[]
 
   // ── days challenge relations ─────────────────────────────────────────────
   daysChallenge        DaysChallenge?
@@ -100,6 +114,21 @@ model User {
   // ── badges / mini-challenges ──────────────────────────────────────────────
   badges               UserBadge[]
   miniChallengeResults MiniChallengeResult[]
+
+  // ── writer's dictionary ─────────────────────────────────────────────────
+  dictionaryEntries    DictionaryEntry[]
+
+  // ── mailbox ───────────────────────────────────────────────────────────
+  mailboxCardsSent     MailboxCard[] @relation("MailboxCardSender")
+  mailboxCardsReceived MailboxCard[] @relation("MailboxCardRecipient")
+
+  // ── follow graph ──────────────────────────────────────────────────────
+  following            Follow[]      @relation("Following")            // rows where THIS user is the follower
+  followers            Follow[]      @relation("Followers")            // rows where THIS user is being followed
+
+  // ── profile likes ─────────────────────────────────────────────────────
+  profileLikesGiven    ProfileLike[] @relation("ProfileLikesMade")
+  profileLikesReceived ProfileLike[] @relation("ProfileLikesReceived")
 }
 
 model UserBlock {
@@ -192,7 +221,10 @@ model Sprint {
   userId        Int
   groupSprintId Int?
   soundscapeId  Int?
+  draftId       Int?         // which draft file this sprint was written in, if any — solo sprints started from the drafts page pass this; older sprints and sprints not tied to a specific file leave it null
+  duration      Int?         // sprint length in minutes, as set at start — nullable since older group sprints derived duration from GroupSprint instead
   startWords    Int          @default(0)
+  currentWords  Int?                        // live word count while the sprint's in progress — pushed via the sprint:progress socket event, separate from endWords which is only set once at checkin. Null until the first live update comes in; also serves as the initial value for anyone loading the room page before that first update arrives.
   bankedWords   Int          @default(0) 
   endWords      Int?                        // raw word count at checkout; wordsWritten/deletedWords are derived from this - startWords
   wordsWritten  Int          @default(0)
@@ -202,14 +234,16 @@ model Sprint {
   completedAt   DateTime?
   isActive      Boolean      @default(true)
 
-  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  groupSprint   GroupSprint? @relation(fields: [groupSprintId], references: [id], onDelete: SetNull)
-  soundscape    Soundscape?  @relation(fields: [soundscapeId], references: [id], onDelete: SetNull)
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  groupSprint   GroupSprint?  @relation(fields: [groupSprintId], references: [id], onDelete: SetNull)
+  soundscape    Soundscape?   @relation(fields: [soundscapeId], references: [id], onDelete: SetNull)
+  draft         WritingDraft? @relation(fields: [draftId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([groupSprintId])
   @@index([isActive])
   @@index([soundscapeId])
+  @@index([draftId])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,7 +276,6 @@ model SprintRoomPresence {
   joinedAt     DateTime   @default(now())
   lastSeenAt   DateTime   @default(now())
   leftAt       DateTime?
-  status       WriterStatus?
 
   sprintRoom   SprintRoom @relation(fields: [sprintRoomId], references: [id], onDelete: Cascade)
   user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -256,11 +289,7 @@ model SprintRoomMessage {
   id               Int        @id @default(autoincrement())
   sprintRoomId     Int
   senderId         Int?       // nullable — preserved if user deleted, same pattern as ThreadComment
-  content          String     // "" for GIF/SOUND messages — they carry mediaUrl/soundKey instead
-
-  messageType      SprintRoomMessageType @default(TEXT)
-  mediaUrl         String?    // set when messageType = GIF (the Tenor gif url)
-  soundKey         String?    // set when messageType = SOUND (e.g. "clap", "tada", "cheer", "support")
+  content          String
 
   mentionedUserIds Int[]      @default([])   // parsed @tags — drives notifyUser()
 
@@ -301,17 +330,6 @@ model SprintRoomNotification {
   @@index([messageId])
 }
 
-enum SprintRoomNotificationKind {
-  MENTION
-  REPLY
-}
-
-enum SprintRoomMessageType {
-  TEXT
-  GIF
-  SOUND
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // SOUNDSCAPE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -336,26 +354,6 @@ model Soundscape {
 // QUOTES, SUBSCRIPTIONS, NOTIFICATIONS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SPRINT REMINDER OPT-IN
-//
-// Tracks which users want to be notified before the weekly Friday sprint.
-// One row per user — upserted when they toggle the checkbox in the UI.
-// ─────────────────────────────────────────────────────────────────────────────
-
-model SprintReminderOptIn {
-  id                    Int      @id @default(autoincrement())
-  userId                Int      @unique          // one row per user
-  optedIn               Boolean  @default(true)   // false = soft-disabled without deleting the row
-  reminderMinutesBefore Int      @default(30)      // future-proofing: user-configurable lead time
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
-
-  user  User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([optedIn])   // the cron job filters on this
-}
-
 model Subscription {
   id           Int      @id @default(autoincrement())
   userId       Int
@@ -366,19 +364,33 @@ model Subscription {
 }
 
 model Notification {
-  id        Int              @id @default(autoincrement())
-  username  String
-  userId    Int
-  message   String?
-  link      String?
-  read      Boolean?         @default(false)
-  type      NotificationType @default(GENERAL)
-  createdAt DateTime         @default(now())
-  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           Int                  @id @default(autoincrement())
+  username     String
+  userId       Int
+  message      String?
+  link         String?
+  read         Boolean?             @default(false)
+  type         NotificationType     @default(GENERAL)
+  category     NotificationCategory? // WRITING (draft plan, sprints) or COMMUNITY (new members, birthdays) — used for the Writing/Community tabs on the bell page. Nullable since older rows and some types (MESSAGE, MAILBOX_CARD, SYSTEM) don't cleanly belong to either.
+  actorId      Int?                 // id of the writer who triggered this (sender, card-giver, etc.) — lets the frontend pop open that user's profile modal on click, independent of `link` (which now points wherever email/push should go, e.g. the workspace). Null for system/GENERAL notices with no single actor.
+  actorAvatar  String?              // avatar of the writer who triggered this (sender, card-giver, etc.) — null for system/GENERAL notices with no single actor
+  createdAt    DateTime             @default(now())
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([userId, read])
   @@index([userId, type])
+  @@index([userId, category])
+}
+
+// Which tab a notification shows up under on the bell page — a second axis
+// alongside NotificationType (type is "what kind of event", category is
+// "which of my two tabs does this belong in"). Only two values exist right
+// now because only two tabs exist; add a third here (and a third tab on the
+// frontend) if that ever changes.
+enum NotificationCategory {
+  WRITING    // draft plan progress/completion/halfway, sprint starts, new draft plans
+  COMMUNITY  // new members, birthdays, new followers
 }
 
 // Used to filter what shows up on the main /notifications bell page.
@@ -393,6 +405,7 @@ enum NotificationType {
   CRITIQUE          // feedback hub activity (new response, report resolved, etc.)
   MESSAGE           // new direct message — reserved, not currently written to inbox
   COMMUNITY_UPDATE  // new blog/community post — reserved, not currently written to inbox
+  MAILBOX_CARD      // received a mailbox card — reserved, not currently written to inbox (mailbox has its own page + unread badge)
   SYSTEM            // account/admin-level notices
 }
 
@@ -653,12 +666,17 @@ model ThreadReplyLike {
 // DRAFT PLAN
 // ─────────────────────────────────────────────────────────────────────────────
 // A writer's personalised drafting plan, created through the three-step
-// onboarding flow. One active plan per writer at a time (enforced in service).
+// onboarding flow. Writers can hold MULTIPLE plans at once (e.g. a novel
+// and a side project) — userId is intentionally NOT unique. Ownership is
+// checked in the service layer on every read/write (findFirst({id, userId})
+// instead of findUnique({userId})). A soft cap on how many active
+// (isCompleted: false) plans one writer can hold at a time is enforced in
+// draftPlanService.createPlan (MAX_ACTIVE_PLANS), not here.
 // ─────────────────────────────────────────────────────────────────────────────
 
 model DraftPlan {
   id               Int      @id @default(autoincrement())
-  userId           Int      @unique   // one active plan per writer
+  userId           Int      // NOT unique — a writer can have several plans
 
   // ── Step 1 — The Math Layer ──────────────────────────────────────────────
   storyTitle       String   // Step 3 — name of their story (stored here for convenience)
@@ -671,14 +689,15 @@ model DraftPlan {
   writingDays         DraftWritingDay[] // which days they typically write
 
   // ── Step 2 — The Emotional Layer ────────────────────────────────────────
-  whyFinish        String   // why they want to finish the draft
-  whatItMeans      String   // what finishing means to them
-  dailyTreat       String   // reward for hitting daily goal
-  weeklyTreat      String   // reward for hitting weekly goal
-  inspirationSource String  // where they get story inspiration
+  // Simplified down to a single field — everything else (whatItMeans,
+  // dailyTreat, weeklyTreat, inspirationSource) has been removed; it isn't
+  // shown anywhere in the redesigned draft plan UI.
+  whyFinish        String   // "Why am I writing this story?"
 
-  // ── Images & Characters ──────────────────────────────────────────────────
-  // Up to 5 moodboard/character art images stored as URL strings in Json array
+  // ── Images ──────────────────────────────────────────────────────────────
+  // Up to 5 moodboard images stored as URL strings in a Json array.
+  // Character fields have been removed entirely (DraftPlanCharacter model
+  // dropped below) — the moodboard is now the only visual section on a plan.
   moodboardImages  Json     @default("[]")   // String[] — up to 5 URLs
 
   // ── Computed / Derived ───────────────────────────────────────────────────
@@ -688,38 +707,42 @@ model DraftPlan {
   // ── Status ───────────────────────────────────────────────────────────────
   isCompleted      Boolean  @default(false)
   completedAt      DateTime?
+  halfwayNotifiedAt DateTime? // set once "50% done" is reached and followers have been notified — prevents re-notifying on every log after crossing the threshold
 
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
   user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  characters       DraftPlanCharacter[]
   progressLogs     DraftProgressLog[]
+  bonusQuests      DraftBonusQuest[]
+  bonusQuestProgress DraftBonusQuestProgress[]
+
+  // The one folder auto-created alongside this plan — see DraftFolder model.
+  // Optional here only because Prisma requires it on both sides of a 1:1;
+  // in practice every plan gets a folder the moment it's created and it's
+  // never removed except by deleting the plan itself.
+  draftFolder      DraftFolder?
 
   @@index([userId])
+  @@index([userId, isCompleted])
+  @@index([userId, updatedAt])
   @@index([isCompleted])
   @@index([createdAt])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DRAFT PLAN CHARACTER
-// Up to 5 characters per plan. Name + short description (≤50 chars).
-// ─────────────────────────────────────────────────────────────────────────────
-
-model DraftPlanCharacter {
-  id          Int      @id @default(autoincrement())
-  planId      Int
-  name        String
-  description String   // max 50 chars — enforced in service
-
-  plan        DraftPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
-
-  @@index([planId])
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // DRAFT PROGRESS LOG
-// One row each time a writer logs their daily progress against their plan.
+// One row per calendar day on a writer's timeline. A row can represent:
+//   - an actual logged writing session (countLogged > 0), OR
+//   - a day the writer has *pre-planned* only (chapterLabel/note/isPickedDay
+//     set ahead of time, countLogged still 0 — e.g. ticking the "planned
+//     writing day" toggle for a future date and naming the chapter before
+//     any words are written).
+// isPickedDay is stored per-row (not just derived from the recurring weekly
+// DraftWritingDay pattern) so a writer can override a single date — mark an
+// unplanned day as a bonus writing day, or unmark a normally-planned date.
+// Timeline status (DONE / BONUS / MISSED / PLANNED) is computed from these
+// fields at read time in the service layer, not stored.
 // ─────────────────────────────────────────────────────────────────────────────
 
 model DraftProgressLog {
@@ -727,11 +750,14 @@ model DraftProgressLog {
   planId         Int
   userId         Int
   logDate        DateTime // calendar date stored as midnight UTC
-  countLogged    Int      // words/chapters/scenes logged for this day
-  isPickedDay    Boolean  @default(false) // true if this log falls on one of the writer's chosen writing days
+  countLogged    Int      @default(0) // words/chapters/scenes logged for this day; 0 = pre-planned only, nothing written yet
+  isPickedDay    Boolean  @default(false) // true if this specific date counts as a planned writing day (overrides the recurring weekly pattern)
+  isBonusDayGoalOptIn Boolean @default(false) // true if, on an unplanned (bonus) day, the writer chose "Daily Goal" over the Quest — counts this log toward sessionsDone/weekTotal/avgPace the same as a picked day (see getPlanProgress), while the day still renders as a Bonus Day card, not a picked day, since isPickedDay itself stays false
   metDailyGoal   Boolean  @default(false)
   totalSoFar     Int      // running word count after this log (wordsWrittenSoFar + all logs)
-  note           String?  // optional writer note for the day
+  chapterLabel   String?  // task/chapter the writer is working on this day, e.g. "Chapter 9 — Opening"
+  note           String?  // optional journal entry for the day
+  timeSpent      Int?     // optional — minutes spent writing this session; null means not recorded, not "0 minutes"
 
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -739,7 +765,7 @@ model DraftProgressLog {
   plan           DraftPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
   user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // One log per plan per calendar day
+  // One row per plan per calendar day
   @@unique([planId, logDate])
   @@index([planId])
   @@index([userId])
@@ -760,6 +786,112 @@ model DraftWritingDay {
   @@unique([planId, day])
   @@index([planId])
   @@index([reminderTimeUTC, day]) // speeds up the cron's per-minute scan
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DRAFT BONUS QUEST
+// Opt-in alternative to a normal progress log, offered only on a day that is
+// NOT one of the writer's picked writing days (see isRecurringPickedDay /
+// DraftProgressLog.isPickedDay — same rule both places). Deliberately kept
+// OUTSIDE the story's word count: countLogged/targetCount here never feed
+// DraftPlan.wordsWrittenSoFar, totalSoFar, or targetLength math, because a
+// 400-word prompt about a stranger at midnight isn't chapter progress. It
+// still counts toward the writer's streak and "wrote today" status (see
+// DailyWritingActivity.hasBonusQuestActivity in writingActivityService) —
+// showing up unprompted should count for something, just not for the book.
+// One quest per plan per calendar day, same shape as DraftProgressLog.
+// ─────────────────────────────────────────────────────────────────────────────
+model DraftBonusQuest {
+  id            Int             @id @default(autoincrement())
+  planId        Int
+  userId        Int
+  logDate       DateTime        // calendar date, midnight UTC
+
+  questType     BonusQuestType
+  status        BonusQuestStatus @default(CHOOSING) // CHOOSING → offering two candidates | ACTIVE → one picked, logging words | DECLINED → writer passed on both, done for the day
+
+  // ── Candidates offered at CHOOSING — snapshotted at open time (see
+  // pickCandidates in draftPlanService.js) so the offer stays stable even
+  // if the underlying BonusQuestPrompt rows change later.
+  candidateAOrderIndex  Int
+  candidateAPrompt      String
+  candidateATargetCount Int
+  candidateBOrderIndex  Int
+  candidateBPrompt      String
+  candidateBTargetCount Int
+
+  // ── Set once the writer picks A or B (pickBonusQuestPrompt) — null while
+  // still CHOOSING, stays null forever if DECLINED.
+  promptOrderIndex Int?         // which BonusQuestPrompt.orderIndex (within questType) this quest was assigned from
+  prompt           String?      // snapshotted prompt text — kept even if the BonusQuestPrompt row is later edited/removed
+  targetCount      Int?         // this quest's own word target — snapshotted from BonusQuestPrompt at assignment time
+
+  countLogged   Int             @default(0)
+  note          String?         // optional journal entry for today's quest — separate from DraftProgressLog.note since a bonus day can carry both a Daily Goal note and a Quest note
+  timeSpent     Int?            // optional — minutes spent on the quest; null means not recorded, not "0 minutes"
+  isCompleted   Boolean         @default(false)
+  completedAt   DateTime?
+  declinedAt    DateTime?       // set when status flips to DECLINED
+
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  plan          DraftPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // One row per plan per calendar day
+  @@unique([planId, logDate])
+  @@index([planId])
+  @@index([userId])
+  @@index([logDate])
+  @@index([status])
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// BONUS QUEST PROMPT  (seedable content table — see prisma/seeds/bonusQuestPrompts.js)
+// The actual quest content, kept OUT of code so it can be edited/expanded by
+// re-running the seed file instead of shipping a deploy. orderIndex is
+// 1-based and defines delivery order WITHIN a questType — see
+// DraftBonusQuestProgress below for how that order gets walked per writer.
+// Not a join table off DraftPlan/User — this is shared reference content,
+// same relationship MiniChallengeTemplate has to MiniChallengeWeekAssignment.
+// ─────────────────────────────────────────────────────────────────────────────
+model BonusQuestPrompt {
+  id           Int             @id @default(autoincrement())
+  questType    BonusQuestType
+  orderIndex   Int             // 1-based position within this questType; determines hand-out order
+  prompt       String
+  targetCount  Int             // word target for this specific prompt (lets targets vary prompt-to-prompt if wanted)
+
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  // One prompt per position per type — this is what lets openBonusQuest look
+  // up "the Nth prompt of type X" directly instead of scanning/sorting.
+  @@unique([questType, orderIndex])
+  @@index([questType])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DRAFT BONUS QUEST PROGRESS  (per-plan cursor through each quest type's list)
+// Tracks, per plan per questType, which BonusQuestPrompt.orderIndex is next
+// in line. The wheel still randomly picks WHICH type a writer gets on a
+// given bonus day, but within that type prompts are handed out 1, 2, 3...
+// in order — never repeated or shuffled — and wrap back to 1 once the list
+// is exhausted. nextIndex starts at 1 (nothing written yet for that type).
+// ─────────────────────────────────────────────────────────────────────────────
+model DraftBonusQuestProgress {
+  id               Int             @id @default(autoincrement())
+  planId           Int
+  questType        BonusQuestType
+  usedOrderIndexes Int[]           @default([]) // orderIndexes of prompts actually PICKED for this type — an offered-but-passed-over prompt stays eligible (see pickCandidates); resets once the whole type's list has been picked through
+
+  updatedAt        DateTime        @updatedAt
+
+  plan             DraftPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  // One cursor per plan per quest type
+  @@unique([planId, questType])
+  @@index([planId])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -808,12 +940,6 @@ model Event {
   @@index([status])
   @@index([startDate])
   @@index([endDate])
-}
-
-enum EventStatus {
-  UPCOMING
-  ACTIVE
-  ENDED
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -919,12 +1045,6 @@ model UserBadge {
   @@unique([userId, sourceType, sourceId, weekStart])  // can't earn the exact same badge twice
   @@index([userId])
   @@index([claimedAt])
-}
-
-enum BadgeSourceType {
-  EVENT
-  MINI_CHALLENGE
-  MILESTONE   // reserved for later — not used yet
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1150,8 +1270,6 @@ model FeedbackSubmission {
 
   isDraft          Boolean          @default(false)
   unpublishedAt    DateTime?
-  writingDraft     WritingDraft?
-  
 
   user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   responses         FeedbackResponse[]
@@ -1275,6 +1393,49 @@ model ParagraphCommentReply {
   @@index([authorId])
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DRAFT FOLDERS
+//
+// Every WritingDraft now lives inside a folder — there's no such thing as a
+// loose draft file anymore. Two flavors, distinguished only by draftPlanId:
+//
+//   - draftPlanId set    → auto-created the moment a DraftPlan is created
+//     (see draftplanservice.js — createPlan should call
+//     draftFolderService.createFolderForPlan(plan) right after the plan row
+//     is inserted). One per plan, enforced by the @unique below. Deleted
+//     automatically (and every draft file inside it, via cascade) if the
+//     plan itself is deleted. Can't be renamed or deleted on its own — its
+//     display name is always read live off draftPlan.storyTitle, never
+//     stored here, so it can never drift out of sync if the writer renames
+//     their story later.
+//
+//   - draftPlanId null    → an ordinary folder the writer made themselves
+//     to hold drafts that aren't tied to any story plan (one-offs, side
+//     pieces, whatever doesn't belong to a tracked project). `name` is
+//     required for these. A writer can make as many as they like.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model DraftFolder {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+
+  // Set only for a plan's auto-created folder; null for a general folder.
+  draftPlanId Int?     @unique
+
+  // Required for general folders; always null for a plan-linked folder
+  // (see note above — those read their name off the plan instead).
+  name        String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  draftPlan   DraftPlan?     @relation(fields: [draftPlanId], references: [id], onDelete: Cascade)
+  drafts      WritingDraft[]
+
+  @@index([userId])
+}
+
 model WritingDraft {
   id                   Int                 @id @default(autoincrement())
   userId               Int
@@ -1282,35 +1443,20 @@ model WritingDraft {
   content              String              @default("")
   wordCount            Int                 @default(0)
 
+  // Every draft file lives inside a folder — either the one auto-created
+  // for a DraftPlan, or a general folder the writer made themselves. See
+  // DraftFolder model above.
+  folderId             Int?
+  folder               DraftFolder?         @relation(fields: [folderId], references: [id], onDelete: Cascade)
+
   // Writer-only scratch notes ("what to fix/add") — draft-overall (paragraphIndex
-  // null) or attached to a specific paragraph. Cascades away with the draft row,
-  // so they naturally disappear the moment a chapter is posted/republished to
-  // the Critique Hub (see StickyNote model for the reasoning).
+  // null) or attached to a specific paragraph. Cascades away with the draft row.
   stickyNotes          StickyNote[]
 
-  // If this draft came from unpublishing a submission, link it
-  sourceSubmissionId   Int?                @unique
-
-  // ── "Staged for feedback" ───────────────────────────────────────────────
-  // True when this draft was saved via the submission form's "Stage Your
-  // Chapter for Feedback" button — i.e. the writer finished a chapter and
-  // chose a submission tier, but didn't have enough posting points to send
-  // it to the Critique Hub yet. This is what distinguishes a chapter that's
-  // genuinely waiting to be unlocked from an ordinary work-in-progress draft
-  // the writer just happens to be drafting on their own (those should never
-  // trigger the "unlock your post" nudge).
-  isStagedForFeedback   Boolean        @default(false)
-
-  // Submission metadata captured at staging time, so the chapter can be
-  // posted in one click once the writer earns enough points — no need to
-  // re-fill the submission form from scratch.
-  stagedGenre           String?
-  stagedSummary         String?
-  stagedWordCountTier   WordCountTier?
-  stagedDraftStage      DraftStage?
-  stagedContentWarnings String[]       @default([])
-  stagedFeedbackWanted  String[]       @default([])
-  stagedAt              DateTime?
+  // Sprints written in this specific file — used to surface "last sprint"
+  // on the drafts page. A sprint keeps its own row even if the draft it
+  // was tied to gets deleted (draftId just goes null, see Sprint model).
+  sprints              Sprint[]
 
   // Lets a writer flag a draft as a priority — starred drafts sort to the
   // top of the drafts list and can be filtered to on their own.
@@ -1320,11 +1466,10 @@ model WritingDraft {
   updatedAt            DateTime            @updatedAt
 
   user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sourceSubmission     FeedbackSubmission? @relation(fields: [sourceSubmissionId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([folderId])
   @@index([createdAt])
-  @@index([userId, isStagedForFeedback])
   @@index([userId, isStarred])
 }
 
@@ -1366,6 +1511,167 @@ model StickyNote {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WRITER'S DICTIONARY
+//
+// A writer's own personal glossary — invented words, worldbuilding terms,
+// character names, whatever they want to keep a definition for. Private to
+// the writer (scoped by userId), just a word + its meaning. Deliberately
+// minimal for now: add / delete / fetch only, no folders, tags, or sharing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model DictionaryEntry {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  word      String   // the term itself, as typed (case preserved for display)
+  meaning   String   // its definition
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Case-sensitive DB backstop against exact duplicates. Case-insensitive
+  // duplicate checking (so "Elf" and "elf" can't both be added) is handled
+  // in the service layer via a `mode: "insensitive"` lookup before create.
+  @@unique([userId, word])
+  @@index([userId])
+  @@index([userId, word])
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKSPACE PROFILE
+// One free-text field for now: "what kind of writer do you want to become."
+// Split out from User (rather than a plain field on it) so it has room to
+// grow — future workspace-only settings land here without touching User.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorkspaceProfile {
+  id          Int      @id @default(autoincrement())
+  userId      Int      @unique
+  aspiration  String?  // "What type of writer do you want to become?"
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAILY WRITING ACTIVITY
+// One row per writer per calendar day (midnight UTC, computed via the same
+// todayInTimezone/toMidnightUTC helpers used elsewhere), aggregating writing
+// activity from all three sources: plain draft edits, sprints, and draft-plan
+// progress logs.
+//
+// hasSprintActivity / hasLogActivity are the ONLY fields streaks are built
+// from — a plain autosave shouldn't make or break a writer's streak, since
+// it can fire without any deliberate "I wrote today" action. wordsFromDrafts
+// still feeds the history/output stats though, since that's a fair measure
+// of actual output.
+//
+// wordsFromLog / chaptersFromLog / scenesFromLog mirror whatever
+// DraftProgressLog.countLogged says for that day+goalType — same "this row
+// stores the day's total, not a delta" convention DraftProgressLog itself
+// uses, so re-logging/correcting a day stays idempotent here too.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model DailyWritingActivity {
+  id                Int      @id @default(autoincrement())
+  userId            Int
+  date              DateTime // calendar date, midnight UTC — one row per user per day
+
+  wordsFromDrafts   Int      @default(0) // net positive word delta from plain (non-sprint) draft edits, accumulated across saves that day
+  wordsFromSprints  Int      @default(0) // words written during sprints that day
+  minutesFromSprints Int     @default(0) // minutes spent sprinting that day (actual elapsed time per sprint, summed) — powers the sprint WPM shown in Community "Writing today"
+  sprintCount       Int      @default(0) // how many sprints were checked in that day — lets "Writing today" show "sprinted 3x" vs a single sprint's own stats
+  wordsFromLog      Int      @default(0) // draft plan log for that day, WORDS-type plans only
+  chaptersFromLog   Int      @default(0) // draft plan log for that day, CHAPTERS-type plans only
+  scenesFromLog     Int      @default(0) // draft plan log for that day, SCENES-type plans only
+  wordsFromBonusQuest Int    @default(0) // Bonus Quest words for that day — kept OUT of wordsFromLog on purpose, so it never inflates "real" story-output totals (getHistory's words sum, totalWordsAcrossDrafts, etc.)
+
+  hasSprintActivity Boolean  @default(false) // streak source
+  hasLogActivity    Boolean  @default(false) // streak source
+  hasBonusQuestActivity Boolean @default(false) // streak source — a completed Bonus Quest counts as "showed up" same as a sprint or log
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId, date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAILBOX  (writer-to-writer cards — no replies, no likes, no threads)
+// ─────────────────────────────────────────────────────────────────────────────
+// Deliberately the simplest possible model: one row per card sent. A writer
+// picks one of four fixed card types and can attach a short personal note.
+// That's it — no reply chain, no reactions, no read receipts visible to the
+// sender. readAt exists only so the RECIPIENT's own mailbox can show an
+// unread badge; it's never exposed to the sender (no "seen" indicator),
+// which is what keeps this from quietly turning into DMs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MailboxCard {
+  id          Int             @id @default(autoincrement())
+  senderId    Int
+  recipientId Int
+  type        MailboxCardType
+
+  note        String          // required — the writer's own greeting/message; the card type alone isn't the send, this is
+
+  createdAt   DateTime        @default(now())
+  readAt      DateTime?       // set once when the recipient opens their mailbox and views this card — powers an unread count, nothing more
+
+  sender      User @relation("MailboxCardSender", fields: [senderId], references: [id], onDelete: Cascade)
+  recipient   User @relation("MailboxCardRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([senderId])
+  @@index([recipientId])
+  @@index([recipientId, readAt]) // unread-count lookups filter on exactly this pair
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FOLLOW  (writer-to-writer follow graph)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Follow {
+  id          Int      @id @default(autoincrement())
+  followerId  Int      // the user doing the following
+  followingId Int      // the user being followed
+  createdAt   DateTime @default(now())
+
+  follower    User     @relation("Following", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("Followers", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId]) // can't follow the same person twice
+  @@index([followerId])
+  @@index([followingId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROFILE LIKE  (a simple "like" on another writer's profile)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ProfileLike {
+  id          Int      @id @default(autoincrement())
+  likerId     Int      // the user who liked
+  likedUserId Int      // the profile that got liked
+  createdAt   DateTime @default(now())
+
+  liker       User     @relation("ProfileLikesMade",     fields: [likerId],     references: [id], onDelete: Cascade)
+  likedUser   User     @relation("ProfileLikesReceived", fields: [likedUserId], references: [id], onDelete: Cascade)
+
+  @@unique([likerId, likedUserId]) // can't like the same profile twice
+  @@index([likerId])
+  @@index([likedUserId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ENUMS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1382,12 +1688,6 @@ enum Role {
 enum SprintType {
   WRITING
   READING
-}
-
-enum WriterStatus {
-  DRAFTING
-  EDITING
-  OUTLINING
 }
 
 enum DraftStage {
@@ -1427,6 +1727,22 @@ enum DraftGoalType {
   WORDS
   CHAPTERS
   SCENES
+}
+
+// The three Bonus Quest flavors offered on off/unplanned days — see
+// DraftBonusQuest. Kept small and fixed on purpose (no admin-managed pool
+// like MiniChallengeTemplate) since these are meant to feel like a fun,
+// low-stakes mystery-chest spin, not a configurable challenge system.
+enum BonusQuestType {
+  PROMPT_WRITE   // write ~400 words from a given prompt
+  SANDBOX_SCENE  // draft a quick scene that doesn't need to fit the story
+  FUN_FACT       // share something short, fun, and personal
+}
+
+enum BonusQuestStatus {
+  CHOOSING
+  ACTIVE
+  DECLINED
 }
 
 enum WeekDay {
@@ -1470,4 +1786,30 @@ enum StickyNoteColor {
   GREEN
   PURPLE
   ORANGE
+}
+
+enum BadgeSourceType {
+  EVENT
+  MINI_CHALLENGE
+  MILESTONE   // reserved for later — not used yet
+}
+
+enum EventStatus {
+  UPCOMING
+  ACTIVE
+  ENDED
+}
+
+enum SprintRoomNotificationKind {
+  MENTION
+  REPLY
+}
+
+enum MailboxCardType {
+  THANK_YOU
+  WELL_DONE
+  CONGRATS
+  WELCOME
+  BIRTHDAY
+  BOOSTER   // encourage/hype card for a writer who just started a new draft plan
 }
